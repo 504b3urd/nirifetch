@@ -1,5 +1,7 @@
 # nirifetch
 
+**English** | [简体中文](README_zh.md)
+
 A lightweight fetch tool built specifically for the [Niri](https://github.com/YaLTeR/niri) Wayland compositor.
 
 Most fetch tools treat the compositor as an afterthought. nirifetch talks to niri directly over its IPC socket, so the window, output and version it reports are the ones niri actually knows about — not a guess assembled from environment variables.
