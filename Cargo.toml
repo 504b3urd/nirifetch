@@ -1,0 +1,24 @@
+[package]
+name = "nirifetch"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.85"
+authors = ["504b3urd"]
+description = "A lightweight neofetch-style system information tool for the Niri Wayland compositor"
+license = "MIT"
+repository = "https://github.com/504b3urd/nirifetch"
+keywords = ["niri", "wayland", "fetch", "neofetch", "cli"]
+categories = ["command-line-utilities"]
+
+# 依赖刻意保持精简：只做 JSON 反序列化与终端着色。
+# 不引入 kdl / chrono / terminal_size 等库，相关能力用 std 手工实现（见 config.rs / ui.rs）。
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+colored = "3"
+
+[profile.release]
+opt-level = "z"   # 体积优先，fetch 工具不需要极致算力
+lto = true
+codegen-units = 1
+strip = true

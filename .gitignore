@@ -1,0 +1,12 @@
+# cargo 构建产物
+/target
+**/*.rs.bk
+
+# 本地工具产物，不该进仓库
+/.claude
+
+# 注意：**不要**在这里写 `/src` 或 `/pkg`。
+# 本仓库的 src/ 是 Rust 源码目录；而 makepkg 的 $srcdir 也叫 src/，
+# 且打包前会先 `rm -rf "$srcdir"`。所以 PKGBUILD 只能在**单独的 AUR 仓库**
+# 里构建，绝不能在本仓库根目录执行 makepkg —— 那会删掉源码。
+PKGBUILD
