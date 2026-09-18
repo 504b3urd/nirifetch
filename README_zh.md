@@ -53,7 +53,15 @@ cargo install --path .
 
 ### Arch Linux
 
-在 Arch 上从源码构建和其他发行版没有区别（`cargo` 包提供工具链）。目前尚无 AUR 包 —— 如果你想帮忙补上，见[诚征维护者](#诚征维护者)。
+目前尚无 `nirifetch` 包，而且现在也没法往 AUR 发布。AUR 因一波恶意上传自 2026 年起一直处于封禁状态：新账号注册在 2026 年 6 月 15 日至 7 月 13 日期间被完全关闭，无主包认领至今仍然停摆，注册也仍被严格的反机器人措施限制。请改用本地构建安装 —— 下面这份配方就是要发布的那一份：
+
+```sh
+git clone https://github.com/504b3urd/nirifetch
+cd nirifetch/packaging
+makepkg -si          # -s 自动装缺失的 makedepends，-i 构建完直接装
+```
+
+`check()` 会跑完整测试套件，升级与重新构建的流程见 [`packaging/README.md`](packaging/README.md)。当然，在 Arch 上直接 `cargo install --path .` 也可以 —— `cargo` 包提供了工具链。
 
 ## 用法
 
@@ -140,7 +148,7 @@ cargo fmt
 - **为你的硬件补全显卡命名。** 跑一下 nirifetch 看看显卡那一行。如果它是错的，或者只显示一个光秃秃的代号，那么带上你的 `pci.ids` 条目给代号表提个补丁 —— 五分钟的修复，能帮到所有用这颗芯片的人。
 - **kitty 之外终端的终端与字体检测。** 目前只实现了 kitty 的配置格式；`gsettings`/`fc-match` 回退拿到的是*系统*字体，未必是你的终端实际渲染的那个。
 - **非 AMD 显卡。** Intel Arc 和 NVIDIA 各有各的命名怪癖。
-- **AUR 打包。** AUR 里目前还没有 `nirifetch` 包。如果你是 AUR 打包维护者，这是个很好接手的小包。
+- **AUR 打包。** `PKGBUILD` 已经写好待用，但 AUR 自 2026 年起的封禁让发布暂时无从谈起（见 [Arch Linux](#arch-linux)）。如果你是 AUR 打包维护者，等它解封后这是个很好接手的小包。
 - **任何其他问题，欢迎提到 [issue tracker](https://github.com/504b3urd/nirifetch/issues)。**
 
 最有用的反馈是附上 `nirifetch` 的输出以及你的 `lspci -nn`。

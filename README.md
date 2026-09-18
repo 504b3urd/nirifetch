@@ -53,7 +53,15 @@ Requires Rust 1.85 or newer (edition 2024).
 
 ### Arch Linux
 
-Building from source works on Arch like anywhere else (the `cargo` package provides the toolchain). There is no AUR package yet — see [Call for maintainers](#call-for-maintainers) if you'd like to help change that.
+There is no `nirifetch` package in the AUR, and it can't be published right now. The AUR has been locked down through 2026 after a wave of malicious uploads: new account registration was closed outright from 15 June to 13 July 2026, package adoption is still disabled, and signups remain heavily restricted by anti-bot measures. Build the package locally instead — the recipe below is the exact file that would be published:
+
+```sh
+git clone https://github.com/504b3urd/nirifetch
+cd nirifetch/packaging
+makepkg -si          # -s installs missing makedepends, -i installs the result
+```
+
+`check()` runs the full test suite, and [`packaging/README.md`](packaging/README.md) covers upgrading and rebuilding. Plain `cargo install --path .` works on Arch too — the `cargo` package provides the toolchain.
 
 ## Usage
 
@@ -140,7 +148,7 @@ If you're a Rust developer who uses niri, contributions are genuinely wanted —
 - **GPU naming for your hardware.** Run nirifetch and check the GPU line. If it's wrong or shows a bare codename, a patch to the codename table with your `pci.ids` entry is a five-minute fix that helps everyone with that chip.
 - **Terminal and font detection** for terminals other than kitty. Only kitty's config format is implemented today; the `gsettings`/`fc-match` fallbacks report a *system* font, not necessarily what your terminal actually renders.
 - **Non-AMD GPUs.** Intel Arc and NVIDIA have their own naming quirks.
-- **AUR packaging.** There is no `nirifetch` package in the AUR yet. If you maintain AUR packages, this is a small one to pick up.
+- **AUR packaging.** The `PKGBUILD` is written and waiting, but the AUR's 2026 lockdown means there's no way to publish it yet (see [Arch Linux](#arch-linux)). If you maintain AUR packages, this is a small one to pick up once that lifts.
 - **Anything in the [issue tracker](https://github.com/504b3urd/nirifetch/issues).**
 
 Bug reports with the output of `nirifetch` plus your `lspci -nn` are the most useful thing you can send.
