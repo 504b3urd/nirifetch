@@ -5,8 +5,14 @@
 # 本地工具产物，不该进仓库
 /.claude
 
+# makepkg 在 packaging/ 里跑时产生的中间物
+/packaging/src/
+/packaging/pkg/
+/packaging/*.tar.gz
+/packaging/*.pkg.tar.*
+
 # 注意：**不要**在这里写 `/src` 或 `/pkg`。
 # 本仓库的 src/ 是 Rust 源码目录；而 makepkg 的 $srcdir 也叫 src/，
-# 且打包前会先 `rm -rf "$srcdir"`。所以 PKGBUILD 只能在**单独的 AUR 仓库**
-# 里构建，绝不能在本仓库根目录执行 makepkg —— 那会删掉源码。
-PKGBUILD
+# 且打包前会先 `rm -rf "$srcdir"`。PKGBUILD 之所以放在 packaging/ 而不是
+# 仓库根目录，就是为了让 $srcdir 落在 packaging/src/，碰不到源码。
+# 绝不能在仓库根目录执行 makepkg。

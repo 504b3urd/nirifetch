@@ -1,0 +1,46 @@
+# Maintainer: 504b3urd <229343051+504b3urd@users.noreply.github.com>
+#
+# 本文件同时用于两处：
+#   1. 上游仓库的 packaging/ 目录 —— 方便任何人自己 makepkg 构建
+#   2. AUR 仓库（aur.archlinux.org/nirifetch）—— 内容与本文件保持一致
+#
+# ⚠️ 不要在上游仓库**根目录**跑 makepkg。
+#    makepkg 的 $srcdir 就叫 `src/`，且解包前会先 `rm -rf "$srcdir"`；
+#    而上游仓库根目录的 src/ 正是 Rust 源码目录 —— 在根目录构建会把源码删掉。
+#    放在 packaging/ 里就没有这个问题：$srcdir 变成 packaging/src/。
+#    AUR 仓库是独立的克隆，在那儿构建天然安全。
+
+pkgname=nirifetch
+pkgver=0.1.0
+pkgrel=1
+pkgdesc="A lightweight fetch tool for the Niri Wayland compositor"
+arch=('x86_64' 'aarch64')
+url="https://github.com/504b3urd/nirifetch"
+license=('MIT')
+depends=('gcc-libs')
+makedepends=('cargo')
+# pci.ids 用来把 1002:1900 这样的 ID 换成 Radeon 780M 这样的商用名。
+# 没有它也能跑，只是显卡名会退化成代号（HawkPoint1）。
+optdepends=('hwdata: for accurate PCI device naming')
+source=("$pkgname-$pkgver.tar.gz::$url/archive/refs/tags/v$pkgver.tar.gz")
+sha256sums=('SKIP')
+
+build() {
+  cd "$pkgname-$pkgver"
+  # --locked 尊重仓库里的 Cargo.lock，避免构建时悄悄升级依赖。
+  # --frozen 会连网络一起断掉；AUR 的干净 chroot 里 cargo 需要联网拉 crate，
+  # 所以这里只用 --locked。
+  cargo build --release --locked
+}
+
+check() {
+  cd "$pkgname-$pkgver"
+  # 全部测试都是自包含的：不联网，也不依赖特定硬件。
+  cargo test --release --locked
+}
+
+package() {
+  cd "$pkgname-$pkgver"
+  install -Dm755 "target/release/$pkgname" "$pkgdir/usr/bin/$pkgname"
+  install -Dm644 LICENSE "$pkgdir/usr/share/licenses/$pkgname/LICENSE"
+}
