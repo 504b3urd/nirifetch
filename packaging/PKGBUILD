@@ -23,7 +23,7 @@ makedepends=('cargo')
 # 没有它也能跑，只是显卡名会退化成代号（HawkPoint1）。
 optdepends=('hwdata: for accurate PCI device naming')
 source=("$pkgname-$pkgver.tar.gz::$url/archive/refs/tags/v$pkgver.tar.gz")
-sha256sums=('SKIP')
+sha256sums=('77fba793d9e4479a569da509cb60a6cbd76398e3a76976cbc41995e6bcde9acb')
 
 build() {
   cd "$pkgname-$pkgver"

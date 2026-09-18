@@ -10,6 +10,9 @@
 /packaging/pkg/
 /packaging/*.tar.gz
 /packaging/*.pkg.tar.*
+# .SRCINFO 是 makepkg --printsrcinfo 的产物，只属于 AUR 仓库。
+# 跟踪它只会制造「改了 PKGBUILD 忘了重新生成」的陷阱。
+/packaging/.SRCINFO
 
 # 注意：**不要**在这里写 `/src` 或 `/pkg`。
 # 本仓库的 src/ 是 Rust 源码目录；而 makepkg 的 $srcdir 也叫 src/，
