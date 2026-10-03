@@ -504,7 +504,7 @@ impl Field {
             Field::Memory => "used / total physical memory",
             Field::Disk => "used / total disk space of /",
             Field::Kernel => "Linux kernel release",
-            Field::Shell => "login shell",
+            Field::Shell => "the shell you are running",
             Field::Uptime => "system uptime",
             Field::Packages => "installed package count and manager",
             Field::Battery => "battery charge and status",

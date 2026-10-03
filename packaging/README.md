@@ -28,7 +28,7 @@ sudo pacman -U nirifetch-0.2.0-1-x86_64.pkg.tar.zst
 ```
 
 `build()` 用 `cargo build --release --locked`，`check()` 会跑完整测试套件
-（199 个测试，不联网也不需要特定硬件）。
+（201 个测试，不联网也不需要特定硬件）。
 
 ## 发布到 AUR
 

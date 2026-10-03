@@ -71,11 +71,53 @@ fn parse_load(text: &str) -> Option<[f32; 3]> {
 //  Shell
 // ════════════════════════════════════════════════════════════════════
 
-/// 当前 Shell 的名字，取自 `$SHELL` 的文件名部分（`/bin/fish` → `fish`）。
+/// 已知的交互式 Shell。精确匹配，避免误伤同前缀的进程名。
+const SHELLS: [&str; 17] = [
+    "fish", "zsh", "bash", "sh", "dash", "ksh", "mksh", "ash", "tcsh", "csh", "nu", "nushell",
+    "elvish", "xonsh", "oil", "osh", "yash",
+];
+
+/// 沿父进程链向上最多回溯的层数。
+const MAX_ANCESTOR_DEPTH: usize = 12;
+
+/// 当前 Shell 的名字。
 ///
-/// 用 `$SHELL`（登录 Shell）而不是沿父进程链找：调用 nirifetch 的往往是
-/// 脚本或 fetch 的打印时机，父进程链未必停在用户交互用的那个 Shell 上。
+/// **优先沿父进程链找正在运行的那个 Shell**，而不是读 `$SHELL` —— `$SHELL`
+/// 只反映**登录 Shell**。很多人登录 Shell 是 bash，却日常在 fish / zsh 里工作，
+/// 只读环境变量就会把 shell 报错。进程链才是事实：`nirifetch → fish → kitty`。
+///
+/// 进程链走不通时（例如从 systemd 服务或文件管理器启动）才退回 `$SHELL`。
 pub fn shell() -> Option<String> {
+    shell_from_process_tree().or_else(shell_from_env)
+}
+
+/// 沿父进程链找最近的已知 Shell。
+fn shell_from_process_tree() -> Option<String> {
+    let mut pid = std::process::id();
+    for _ in 0..MAX_ANCESTOR_DEPTH {
+        let name = sys::process_name(pid)?;
+        if let Some(shell) = match_shell(&name) {
+            return Some(shell.to_owned());
+        }
+        match sys::parent_pid(pid) {
+            Some(parent) if parent > 1 => pid = parent,
+            _ => break,
+        }
+    }
+    None
+}
+
+/// 把进程名规范化成已知 Shell 名；`-bash` 这类登录 Shell 前缀一并容忍。
+fn match_shell(process: &str) -> Option<&'static str> {
+    let name = process.trim().trim_start_matches('-');
+    SHELLS
+        .iter()
+        .find(|shell| name.eq_ignore_ascii_case(shell))
+        .copied()
+}
+
+/// `$SHELL` 兜底：取其文件名部分（`/bin/fish` → `fish`）。
+fn shell_from_env() -> Option<String> {
     let path = sys::env_non_empty("SHELL")?;
     let name = Path::new(&path)
         .file_name()
@@ -307,6 +349,20 @@ mod tests {
         // 字段不足同样返回 None，不能 panic。
         assert_eq!(parse_load("0.1 0.2"), None);
         assert_eq!(parse_load(""), None);
+    }
+
+    #[test]
+    fn shell_matching_is_exact_and_tolerates_login_prefix() {
+        assert_eq!(match_shell("fish"), Some("fish"));
+        assert_eq!(match_shell("FISH"), Some("fish"));
+        assert_eq!(match_shell("zsh"), Some("zsh"));
+        // 登录 Shell 的进程名会带前导 `-`。
+        assert_eq!(match_shell("-bash"), Some("bash"));
+        assert_eq!(match_shell("  nu  "), Some("nu"));
+        // 同前缀的无关进程不能被误判。
+        assert_eq!(match_shell("bashful"), None);
+        assert_eq!(match_shell("shim"), None);
+        assert_eq!(match_shell(""), None);
     }
 
     #[test]

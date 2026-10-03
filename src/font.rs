@@ -118,7 +118,7 @@ fn detect_terminal_from_process_tree() -> Option<String> {
             multiplexer = Some((*mux).to_owned());
         }
 
-        match parent_of(pid) {
+        match sys::parent_pid(pid) {
             // pid 1 是 init，走到它就到底了。
             Some(parent) if parent > 1 => pid = parent,
             _ => break,
@@ -141,24 +141,6 @@ fn match_terminal(process: &str) -> Option<&'static str> {
         .iter()
         .find(|name| process == **name)
         .copied()
-}
-
-/// 读取 `/proc/<pid>/stat` 里的父进程 PID。
-///
-/// `stat` 的第 2 个字段是 `(comm)`，而 comm 里**可以包含空格甚至右括号**
-/// （`tmux: server`、`(sd-pam)`），所以不能按空白切分 —— 必须从最后一个
-/// `)` 之后开始解析。字段顺序：comm 之后依次是 state、ppid。
-fn parent_of(pid: u32) -> Option<u32> {
-    let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
-    parse_ppid(&stat)
-}
-
-/// [`parent_of`] 的纯解析部分，便于用畸形输入做测试。
-fn parse_ppid(stat: &str) -> Option<u32> {
-    let (_, after_comm) = stat.rsplit_once(')')?;
-    let mut fields = after_comm.split_whitespace();
-    fields.next()?; // state
-    fields.next()?.parse().ok() // ppid
 }
 
 /// 环境变量兜底。进程链走不通时（例如从 systemd 服务启动）用它。
@@ -475,38 +457,6 @@ fn parse_fc_match(raw: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    // ── /proc/<pid>/stat 解析 ─────────────────────────────────────
-
-    #[test]
-    fn parses_ppid_from_a_normal_stat_line() {
-        // pid (comm) state ppid ...
-        assert_eq!(parse_ppid("1234 (kitty) S 1000 1234 1234 0 -1"), Some(1000));
-    }
-
-    #[test]
-    fn parses_ppid_when_comm_contains_spaces() {
-        // tmux 的 comm 带空格，按空白切分会错位。
-        assert_eq!(
-            parse_ppid("900 (tmux: server) S 1797 900 900 0 -1"),
-            Some(1797)
-        );
-    }
-
-    #[test]
-    fn parses_ppid_when_comm_contains_parentheses() {
-        // comm 里连右括号都可能出现 —— 必须从**最后**一个 ')' 之后开始解析。
-        assert_eq!(parse_ppid("900 (weird)name) S 4242 900 900 0"), Some(4242));
-    }
-
-    #[test]
-    fn rejects_malformed_stat_lines() {
-        assert_eq!(parse_ppid(""), None);
-        assert_eq!(parse_ppid("no parens here"), None);
-        // 括号后缺少 ppid 字段。
-        assert_eq!(parse_ppid("1234 (kitty) S"), None);
-        assert_eq!(parse_ppid("1234 (kitty) S notanumber 0"), None);
-    }
 
     // ── 终端匹配 ──────────────────────────────────────────────────
 
