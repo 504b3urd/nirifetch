@@ -110,10 +110,30 @@ const ICON_BAR: &str = "\u{f10ac}";
 const ICON_FONT: &str = "\u{f031}";
 /// md-memory（Material Design Icons，需 Nerd Font v3+）
 const ICON_CPU: &str = "\u{f035b}";
-/// md-expansion-card
+/// fa-expansion-card
 const ICON_GPU: &str = "\u{f08ae}";
 /// fa-tint
 const ICON_PALETTE: &str = "\u{f043}";
+/// fa-th-large —— 工作区
+const ICON_WORKSPACE: &str = "\u{f009}";
+/// fa-keyboard-o —— 键盘布局
+const ICON_KEYBOARD: &str = "\u{f11c}";
+/// fa-microchip —— 内存
+const ICON_MEMORY: &str = "\u{f2db}";
+/// fa-hdd-o —— 磁盘
+const ICON_DISK: &str = "\u{f0a0}";
+/// fa-cogs —— 内核
+const ICON_KERNEL: &str = "\u{f085}";
+/// fa-code —— Shell
+const ICON_SHELL: &str = "\u{f121}";
+/// fa-clock-o —— 运行时长
+const ICON_UPTIME: &str = "\u{f017}";
+/// fa-cube —— 软件包
+const ICON_PACKAGES: &str = "\u{f1b2}";
+/// fa-battery-full —— 电池
+const ICON_BATTERY: &str = "\u{f240}";
+/// fa-tachometer —— 负载
+const ICON_LOAD: &str = "\u{f0e4}";
 
 /// 图标 + 一个空格占用的列数。
 const ICON_SLOT: usize = 2;
@@ -158,7 +178,7 @@ const GAP: usize = 2;
 ///
 /// 派生 `Serialize` 是给 `--json` 用的：JSON 与终端排版**共用同一份模型**，
 /// 因此两边字段不可能对不上，加字段时也不会漏掉某一个输出格式。
-/// 着色全部发生在 [`field_values`] 里，模型自身始终是纯文本，
+/// 着色全部发生在 [`field_value`] 里，模型自身始终是纯文本，
 /// 序列化出来天然干净。
 #[derive(Debug, Clone, Serialize)]
 pub struct Info {
@@ -183,6 +203,22 @@ pub struct Info {
     pub cpu: Option<CpuView>,
     /// 全部显卡，活跃的排在前面。空表示一张都没探测到。
     pub gpus: Vec<GpuView>,
+    /// 当前工作区与窗口统计。
+    pub workspace: Option<WorkspaceView>,
+    /// 当前键盘布局名。
+    pub keyboard: Option<String>,
+    pub memory: Option<MemoryView>,
+    pub disk: Option<DiskView>,
+    pub kernel: Option<String>,
+    pub shell: Option<String>,
+    /// 系统运行时长（秒）。
+    pub uptime: Option<u64>,
+    pub packages: Option<PackageView>,
+    pub battery: Option<BatteryView>,
+    /// 1 / 5 / 15 分钟平均负载。
+    pub load: Option<[f32; 3]>,
+    /// 终端真实调色板（RGB）。`None` 时用内置的高亮色板兜底。
+    pub palette: Option<Vec<(u8, u8, u8)>>,
 }
 
 /// 聚焦窗口的展示数据。
@@ -220,6 +256,15 @@ pub struct ConfigView {
     pub source_label: Option<&'static str>,
     pub size: Option<u64>,
     pub lines: Option<usize>,
+    /// `niri validate` 的结果。`None` 表示没法校验（niri 缺失 / 超时）。
+    pub validation: Option<ValidationView>,
+}
+
+/// 配置校验结果。
+#[derive(Debug, Clone, Serialize)]
+pub struct ValidationView {
+    pub ok: bool,
+    pub message: Option<String>,
 }
 
 /// CPU 的展示数据。
@@ -242,104 +287,361 @@ pub struct GpuView {
     pub active: bool,
 }
 
+/// 工作区与窗口统计。
+#[derive(Debug, Clone, Serialize)]
+pub struct WorkspaceView {
+    /// 当前聚焦工作区的序号（从 1 开始）；取不到为 `None`。
+    pub focused_idx: Option<usize>,
+    /// 工作区总数。
+    pub total: usize,
+    /// 打开的窗口总数。
+    pub windows: usize,
+}
+
+/// 内存用量（单位 KiB）。
+#[derive(Debug, Clone, Copy, Serialize)]
+pub struct MemoryView {
+    pub total_kib: u64,
+    pub available_kib: u64,
+}
+
+/// 磁盘用量（单位 KiB）。
+#[derive(Debug, Clone, Serialize)]
+pub struct DiskView {
+    pub mount: String,
+    pub used_kib: u64,
+    pub total_kib: u64,
+}
+
+/// 软件包统计。
+#[derive(Debug, Clone, Serialize)]
+pub struct PackageView {
+    pub count: usize,
+    pub manager: &'static str,
+}
+
+/// 电池状态。
+#[derive(Debug, Clone, Serialize)]
+pub struct BatteryView {
+    pub percent: u8,
+    pub status: Option<String>,
+}
+
 // ════════════════════════════════════════════════════════════════════
 //  字段表
 // ════════════════════════════════════════════════════════════════════
 
-/// 字段的固定部分：`(标签, 图标)`，顺序即输出顺序。
+/// 可选的信息字段。输出的行序即 [`Field::ALL`] 的顺序。
 ///
-/// 单独抽成常量是因为**值列的宽度预算必须在构造字段之前算出来**，
-/// 而预算依赖标签列的最大宽度。
-const FIELD_LABELS: [(&str, &str); 11] = [
-    ("OS", ICON_OS),
-    ("WM", ICON_WM),
-    ("Structure", ICON_STRUCTURE),
-    ("Config", ICON_CONFIG),
-    ("Output", ICON_OUTPUT),
-    // Bar 紧跟 Output：先讲屏幕，再讲屏幕上的状态栏，桌面层级是自上而下的。
-    ("Bar", ICON_BAR),
-    ("Terminal", ICON_TERMINAL),
-    ("Font", ICON_FONT),
-    ("CPU", ICON_CPU),
-    ("GPU", ICON_GPU),
-    ("Palette", ICON_PALETTE),
-];
+/// 用枚举而不是「标签字符串」是因为字段现在可以由 `--fields` / `--short`
+/// 任意筛选、排序；枚举让「有哪些字段、各自怎么画」在类型层面收敛到一处，
+/// 加字段时不会漏掉渲染分支（match 会强制补齐）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Field {
+    Os,
+    Wm,
+    Structure,
+    Config,
+    Output,
+    Bar,
+    Terminal,
+    Font,
+    Workspace,
+    Keyboard,
+    Cpu,
+    Gpu,
+    Memory,
+    Disk,
+    Kernel,
+    Shell,
+    Uptime,
+    Packages,
+    Battery,
+    Load,
+    Palette,
+}
+
+impl Field {
+    /// 全部字段，顺序即默认输出顺序。
+    ///
+    /// 分组逻辑：先是 niri 会话本身（OS→WM→配置→屏幕→状态栏→终端），
+    /// 再是运行时状态（工作区 / 键盘），然后是硬件（CPU→GPU→内存→磁盘），
+    /// 最后是系统与杂项（内核→Shell→运行时长→包→电池→负载→调色板）。
+    pub const ALL: [Field; 21] = [
+        Field::Os,
+        Field::Wm,
+        Field::Structure,
+        Field::Config,
+        Field::Output,
+        // Bar 紧跟 Output：先讲屏幕，再讲屏幕上的状态栏，桌面层级是自上而下的。
+        Field::Bar,
+        Field::Terminal,
+        Field::Font,
+        Field::Workspace,
+        Field::Keyboard,
+        Field::Cpu,
+        Field::Gpu,
+        Field::Memory,
+        Field::Disk,
+        Field::Kernel,
+        Field::Shell,
+        Field::Uptime,
+        Field::Packages,
+        Field::Battery,
+        Field::Load,
+        Field::Palette,
+    ];
+
+    /// `--short` 用的精简集合：一屏能看完的关键信息。
+    pub const SHORT: [Field; 9] = [
+        Field::Os,
+        Field::Wm,
+        Field::Output,
+        Field::Workspace,
+        Field::Cpu,
+        Field::Gpu,
+        Field::Memory,
+        Field::Battery,
+        Field::Palette,
+    ];
+
+    /// 展示标签。
+    pub fn label(self) -> &'static str {
+        match self {
+            Field::Os => "OS",
+            Field::Wm => "WM",
+            Field::Structure => "Structure",
+            Field::Config => "Config",
+            Field::Output => "Output",
+            Field::Bar => "Bar",
+            Field::Terminal => "Terminal",
+            Field::Font => "Font",
+            Field::Workspace => "Workspace",
+            Field::Keyboard => "Keyboard",
+            Field::Cpu => "CPU",
+            Field::Gpu => "GPU",
+            Field::Memory => "Memory",
+            Field::Disk => "Disk",
+            Field::Kernel => "Kernel",
+            Field::Shell => "Shell",
+            Field::Uptime => "Uptime",
+            Field::Packages => "Packages",
+            Field::Battery => "Battery",
+            Field::Load => "Load",
+            Field::Palette => "Palette",
+        }
+    }
+
+    /// Nerd Font 图标。
+    pub fn icon(self) -> &'static str {
+        match self {
+            Field::Os => ICON_OS,
+            Field::Wm => ICON_WM,
+            Field::Structure => ICON_STRUCTURE,
+            Field::Config => ICON_CONFIG,
+            Field::Output => ICON_OUTPUT,
+            Field::Bar => ICON_BAR,
+            Field::Terminal => ICON_TERMINAL,
+            Field::Font => ICON_FONT,
+            Field::Workspace => ICON_WORKSPACE,
+            Field::Keyboard => ICON_KEYBOARD,
+            Field::Cpu => ICON_CPU,
+            Field::Gpu => ICON_GPU,
+            Field::Memory => ICON_MEMORY,
+            Field::Disk => ICON_DISK,
+            Field::Kernel => ICON_KERNEL,
+            Field::Shell => ICON_SHELL,
+            Field::Uptime => ICON_UPTIME,
+            Field::Packages => ICON_PACKAGES,
+            Field::Battery => ICON_BATTERY,
+            Field::Load => ICON_LOAD,
+            Field::Palette => ICON_PALETTE,
+        }
+    }
+
+    /// `--fields` 里使用的名字（小写、无空格）。
+    pub fn name(self) -> &'static str {
+        match self {
+            Field::Os => "os",
+            Field::Wm => "wm",
+            Field::Structure => "structure",
+            Field::Config => "config",
+            Field::Output => "output",
+            Field::Bar => "bar",
+            Field::Terminal => "terminal",
+            Field::Font => "font",
+            Field::Workspace => "workspace",
+            Field::Keyboard => "keyboard",
+            Field::Cpu => "cpu",
+            Field::Gpu => "gpu",
+            Field::Memory => "memory",
+            Field::Disk => "disk",
+            Field::Kernel => "kernel",
+            Field::Shell => "shell",
+            Field::Uptime => "uptime",
+            Field::Packages => "packages",
+            Field::Battery => "battery",
+            Field::Load => "load",
+            Field::Palette => "palette",
+        }
+    }
+
+    /// 供 `--help` 使用的一句话说明。
+    pub fn description(self) -> &'static str {
+        match self {
+            Field::Os => "user@host",
+            Field::Wm => "running niri compositor version",
+            Field::Structure => "modular (includes) or monolithic config layout",
+            Field::Config => "niri config path, size and validate status",
+            Field::Output => "primary output resolution, refresh rate and scale",
+            Field::Bar => "status bar or desktop shell (waybar, noctalia, eww, …)",
+            Field::Terminal => "terminal emulator, plus the focused window",
+            Field::Font => "font used by that terminal",
+            Field::Workspace => "focused workspace, total workspaces and window count",
+            Field::Keyboard => "active keyboard layout",
+            Field::Cpu => "processor model, physical cores and threads",
+            Field::Gpu => "graphics cards; the one driving a display is marked",
+            Field::Memory => "used / total physical memory",
+            Field::Disk => "used / total disk space of /",
+            Field::Kernel => "Linux kernel release",
+            Field::Shell => "login shell",
+            Field::Uptime => "system uptime",
+            Field::Packages => "installed package count and manager",
+            Field::Battery => "battery charge and status",
+            Field::Load => "1 / 5 / 15 minute load average",
+            Field::Palette => "8 terminal palette swatches",
+        }
+    }
+
+    /// 按名字（大小写不敏感）解析字段。
+    pub fn from_name(name: &str) -> Option<Field> {
+        let name = name.trim();
+        Field::ALL
+            .into_iter()
+            .find(|field| field.name().eq_ignore_ascii_case(name))
+    }
+}
+
+/// 选中的字段、Logo 形态与着色开关。由 `main` 从命令行参数构造。
+#[derive(Debug, Clone)]
+pub struct Layout {
+    pub fields: Vec<Field>,
+    pub logo: Logo,
+    /// 强制关闭真彩色渐变（`--ascii`）。
+    pub ascii: bool,
+}
+
+/// 左侧 Logo 的形态。
+#[derive(Debug, Clone)]
+pub enum Logo {
+    /// 内置的 Niri 点阵字样。
+    Niri,
+    /// 不显示 Logo。
+    None,
+    /// 用户用 `--logo-file` 提供的自定义 Logo（逐行）。
+    Custom(Vec<String>),
+}
 
 /// 标签列宽度 —— 由最长的标签（`Structure`）决定。
 fn label_column_width() -> usize {
-    FIELD_LABELS
+    Field::ALL
         .iter()
-        .map(|(label, _)| label.chars().count())
+        .map(|field| field.label().chars().count())
         .max()
         .unwrap_or(0)
 }
 
-/// 各字段的值。**顺序必须与 [`FIELD_LABELS`] 一一对应**
-/// （两边都是定长 11，长度由类型系统保证）。
+/// 单个字段的值。
 ///
 /// 各格式化函数会先做**有取舍的**降级（丢掉次要的括号信息、保住主体），
 /// 之后这里再统一按预算兜底截断一次 —— 这样「任何一行都不撑破右边界」
 /// 是结构性保证，新加字段时不会因为忘了传预算而破功。
-fn field_values(info: &Info, value_budget: usize) -> [String; 11] {
-    let raw = [
-        format!(
+fn field_value(field: Field, info: &Info, value_budget: usize) -> String {
+    let value = match field {
+        Field::Os => format!(
             "{}{}{}",
             info.user.bold().cyan(),
             "@".bright_black(),
             info.host.bold().cyan()
         ),
-        format_wm(info.wm.as_deref()),
-        info.structure.clone(),
-        format_config(&info.config, info.home.as_deref(), value_budget),
-        format_output(info.output.as_ref(), value_budget),
-        format_bar(info.bar),
-        format_terminal(info.terminal.as_deref(), &info.window, value_budget),
-        info.font
+        Field::Wm => format_wm(info.wm.as_deref()),
+        Field::Structure => info.structure.clone(),
+        Field::Config => format_config(&info.config, info.home.as_deref(), value_budget),
+        Field::Output => format_output(info.output.as_ref(), value_budget),
+        Field::Bar => format_bar(info.bar),
+        Field::Terminal => format_terminal(info.terminal.as_deref(), &info.window, value_budget),
+        Field::Font => info
+            .font
             .clone()
             .map_or_else(unknown, |f| f.bold().to_string()),
-        format_cpu(info.cpu.as_ref(), value_budget),
-        format_gpu(&info.gpus, value_budget),
-        palette_line(),
-    ];
-    raw.map(|value| truncate(&value, value_budget))
+        Field::Workspace => format_workspace(info.workspace.as_ref()),
+        Field::Keyboard => format_keyboard(info.keyboard.as_deref()),
+        Field::Cpu => format_cpu(info.cpu.as_ref(), value_budget),
+        Field::Gpu => format_gpu(&info.gpus, value_budget),
+        Field::Memory => format_memory(info.memory.as_ref()),
+        Field::Disk => format_disk(info.disk.as_ref()),
+        Field::Kernel => format_kernel(info.kernel.as_deref()),
+        Field::Shell => format_shell(info.shell.as_deref()),
+        Field::Uptime => format_uptime(info.uptime),
+        Field::Packages => format_packages(info.packages.as_ref()),
+        Field::Battery => format_battery(info.battery.as_ref()),
+        Field::Load => format_load(info.load),
+        Field::Palette => palette_line(info.palette.as_deref()),
+    };
+    truncate(&value, value_budget)
 }
 
 // ════════════════════════════════════════════════════════════════════
 //  主渲染
 // ════════════════════════════════════════════════════════════════════
 
-/// 渲染整屏输出：左侧 Logo，右侧「图标 + 标签 + 值」信息栏。
-pub fn render(info: &Info) {
-    let truecolor = supports_truecolor();
+/// 渲染整屏输出：左侧 Logo（可选），右侧「图标 + 标签 + 值」信息栏。
+pub fn render(info: &Info, layout: &Layout) {
+    let truecolor = supports_truecolor() && !layout.ascii;
     let icons = icons_enabled();
 
     // ── 左列 ──────────────────────────────────────────────────────
-    let logo = logo_lines(truecolor);
+    let logo = logo_lines(&layout.logo, truecolor);
     let logo_width = logo.iter().map(|(w, _)| *w).max().unwrap_or(0);
 
     // ── 布局预算：先算宽度，再构造字段 ────────────────────────────
     let icon_slot = if icons { ICON_SLOT } else { 0 };
     let label_width = label_column_width();
+    // 没有 Logo 时不占 Logo 列，也不必补那一格间距。
+    let left_slot = if logo_width > 0 { logo_width + GAP } else { 0 };
     let value_budget = terminal_width()
-        .saturating_sub(logo_width + GAP + icon_slot + label_width + GAP)
+        .saturating_sub(left_slot + icon_slot + label_width + GAP)
         .clamp(VALUE_MIN, VALUE_MAX);
     let rule_width = value_budget.min(RULE_MAX);
 
-    let values = field_values(info, value_budget);
-
-    // ── 右列：OS 之后插一条分隔线，把标题行与明细行隔开 ────────────
-    let mut right: Vec<String> = Vec::with_capacity(FIELD_LABELS.len() + 1);
-    for (idx, ((label, icon), value)) in FIELD_LABELS.iter().zip(&values).enumerate() {
-        right.push(field_row(label, icon, value, label_width, icons));
+    // ── 右列：首个字段之后插一条分隔线，把标题行与明细行隔开 ──────
+    let mut right: Vec<String> = Vec::with_capacity(layout.fields.len() + 1);
+    for (idx, field) in layout.fields.iter().enumerate() {
+        let value = field_value(*field, info, value_budget);
+        right.push(field_row(
+            field.label(),
+            field.icon(),
+            &value,
+            label_width,
+            icons,
+        ));
         if idx == 0 {
             right.push(separator_row(label_width, rule_width, icon_slot));
         }
     }
 
+    // ── 无 Logo：右列独占整行 ─────────────────────────────────────
+    if logo.is_empty() {
+        for content in &right {
+            println!("{}", content.trim_end());
+        }
+        return;
+    }
+
     // ── 左右合并 ──────────────────────────────────────────────────
     //
-    // 信息栏通常比 Logo 高（10 个字段 + 分隔线 vs 6 行），顶部对齐会让左下角
-    // 空出一大块。把 Logo 垂直居中，两列的视觉重心才对得上。
+    // 信息栏通常比 Logo 高，顶部对齐会让左下角空出一大块。把 Logo 垂直居中，
+    // 两列的视觉重心才对得上。
     let logo_offset = right.len().saturating_sub(logo.len()) / 2;
     let total = right.len().max(logo.len() + logo_offset);
 
@@ -380,31 +682,50 @@ fn json_text(info: &Info) -> String {
 ///
 /// 同时返回宽度是因为着色后的字符串无法再量宽度（ANSI 序列会被算进去），
 /// 必须在这里把纯文本宽度一并带出来。
-fn logo_lines(truecolor: bool) -> Vec<(usize, String)> {
-    let last = LOGO_ART.len().saturating_sub(1);
-    let mut lines: Vec<(usize, String)> = LOGO_ART
-        .iter()
-        .enumerate()
-        .map(|(i, line)| {
-            (
-                display_width(line),
-                line.color(logo_color(i, last, truecolor)).to_string(),
-            )
-        })
-        .collect();
+fn logo_lines(logo: &Logo, truecolor: bool) -> Vec<(usize, String)> {
+    match logo {
+        Logo::None => Vec::new(),
+        Logo::Custom(art) => {
+            let last = art.len().saturating_sub(1);
+            art.iter()
+                .enumerate()
+                .map(|(i, line)| {
+                    (
+                        display_width(line),
+                        line.as_str()
+                            .color(logo_color(i, last, truecolor))
+                            .to_string(),
+                    )
+                })
+                .collect()
+        }
+        Logo::Niri => {
+            let last = LOGO_ART.len().saturating_sub(1);
+            let mut lines: Vec<(usize, String)> = LOGO_ART
+                .iter()
+                .enumerate()
+                .map(|(i, line)| {
+                    (
+                        display_width(line),
+                        line.color(logo_color(i, last, truecolor)).to_string(),
+                    )
+                })
+                .collect();
 
-    let tagline_color = if truecolor {
-        let (r, g, b) = TAGLINE_TRUECOLOR;
-        Color::TrueColor { r, g, b }
-    } else {
-        Color::Cyan
-    };
-    lines.push((
-        display_width(LOGO_TAGLINE),
-        LOGO_TAGLINE.italic().color(tagline_color).to_string(),
-    ));
+            let tagline_color = if truecolor {
+                let (r, g, b) = TAGLINE_TRUECOLOR;
+                Color::TrueColor { r, g, b }
+            } else {
+                Color::Cyan
+            };
+            lines.push((
+                display_width(LOGO_TAGLINE),
+                LOGO_TAGLINE.italic().color(tagline_color).to_string(),
+            ));
 
-    lines
+            lines
+        }
+    }
 }
 
 /// 一行字段：`<图标> <标签><补白><值>`。
@@ -658,7 +979,7 @@ fn format_output(o: Option<&OutputView>, budget: usize) -> String {
 ///
 /// 值本身就是 [`crate::bar`] 规范化好的展示名（`&'static str`），这里只负责
 /// 着色与兜底 —— 与 Font 一行同样的处理，所以不单独做降级：名字最长的
-/// `Dank Material Shell (DMS)` 也只有 25 格，窄终端交给 `field_values` 的
+/// `Dank Material Shell (DMS)` 也只有 25 格，窄终端交给 `field_value` 的
 /// 统一截断即可。
 fn format_bar(bar: Option<&str>) -> String {
     match bar.map(str::trim).filter(|s| !s.is_empty()) {
@@ -703,22 +1024,195 @@ fn format_config(c: &ConfigView, home: Option<&str>, budget: usize) -> String {
         )
     };
 
+    // 校验标记挂在元信息之后：合法只给一个绿勾，非法补一句错误摘要。
+    let full = match &c.validation {
+        Some(v) if v.ok => format!("{full} {}", "✓".green()),
+        Some(v) => {
+            let mut text = format!("{full} {}", "✗".red().bold());
+            if let Some(message) = &v.message {
+                text.push_str(&format!(" {}", message.bright_black()));
+            }
+            text
+        }
+        None => full,
+    };
+
     if plain_width(&full) <= budget {
         return full;
     }
 
-    // 路径 + ` (size · lines)` 放不下，退到只剩路径；
+    // 路径 + 元信息 + 校验放不下，退到只剩路径；
     // 连路径都放不下才截断它。
     truncate(&path, budget).bold().to_string()
 }
 
+/// 工作区：聚焦序号 + 总数 + 窗口数。
+fn format_workspace(w: Option<&WorkspaceView>) -> String {
+    let Some(w) = w else {
+        return unknown();
+    };
+    let head = match w.focused_idx {
+        Some(idx) => format!(
+            "{} {}",
+            idx.to_string().bold().cyan(),
+            format!("of {}", w.total).bright_black()
+        ),
+        None => format!(
+            "{} {}",
+            w.total.to_string().bold().cyan(),
+            "workspaces".bright_black()
+        ),
+    };
+    format!(
+        "{head} {} {}",
+        "·".bright_black(),
+        format!("{} windows", w.windows).bright_black()
+    )
+}
+
+/// 键盘布局：当前布局名。
+fn format_keyboard(name: Option<&str>) -> String {
+    name.map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map_or_else(unknown, |name| name.bold().cyan().to_string())
+}
+
+/// 内存：`3.5 GiB / 19.3 GiB`（已用 / 总量）。
+fn format_memory(m: Option<&MemoryView>) -> String {
+    let Some(m) = m else {
+        return unknown();
+    };
+    let used = m.total_kib.saturating_sub(m.available_kib);
+    format!(
+        "{} {} {}",
+        humanize_kib(used).bold().cyan(),
+        "/".bright_black(),
+        humanize_kib(m.total_kib).bright_black()
+    )
+}
+
+/// 磁盘：`37.9 GiB / 231.9 GiB · 17%`。
+fn format_disk(d: Option<&DiskView>) -> String {
+    let Some(d) = d else {
+        return unknown();
+    };
+    let percent = d.used_kib.saturating_mul(100).checked_div(d.total_kib);
+    let mut text = format!(
+        "{} {} {}",
+        humanize_kib(d.used_kib).bold().cyan(),
+        "/".bright_black(),
+        humanize_kib(d.total_kib).bright_black()
+    );
+    if let Some(percent) = percent {
+        text.push_str(&format!(
+            " {} {}",
+            "·".bright_black(),
+            format!("{percent}%").bright_black()
+        ));
+    }
+    text
+}
+
+/// 内核版本。
+fn format_kernel(kernel: Option<&str>) -> String {
+    plain_or_unknown(kernel, |text| text.bold().cyan().to_string())
+}
+
+/// 当前 Shell。
+fn format_shell(shell: Option<&str>) -> String {
+    plain_or_unknown(shell, |text| text.bold().cyan().to_string())
+}
+
+/// 运行时长：`3d 4h` / `4h 5m` / `5m`。
+fn format_uptime(seconds: Option<u64>) -> String {
+    let Some(seconds) = seconds else {
+        return unknown();
+    };
+    let days = seconds / 86_400;
+    let hours = (seconds % 86_400) / 3_600;
+    let minutes = (seconds % 3_600) / 60;
+    let text = if days > 0 {
+        format!("{days}d {hours}h")
+    } else if hours > 0 {
+        format!("{hours}h {minutes}m")
+    } else {
+        format!("{minutes}m")
+    };
+    text.bold().cyan().to_string()
+}
+
+/// 软件包数量：`1061 (pacman)`。
+fn format_packages(p: Option<&PackageView>) -> String {
+    let Some(p) = p else {
+        return unknown();
+    };
+    format!(
+        "{} {}",
+        p.count.to_string().bold().cyan(),
+        format!("({})", p.manager).bright_black()
+    )
+}
+
+/// 电池：`85% · Charging`。充电 / 满电标绿，低电量放电标红。
+fn format_battery(b: Option<&BatteryView>) -> String {
+    let Some(b) = b else {
+        return unknown();
+    };
+    let percent = format!("{}%", b.percent);
+    let charging = |s: &str| s.eq_ignore_ascii_case("charging") || s.eq_ignore_ascii_case("full");
+    let colored = match b.status.as_deref() {
+        Some(status) if charging(status) => percent.green().to_string(),
+        Some(status) if status.eq_ignore_ascii_case("discharging") && b.percent <= 20 => {
+            percent.red().to_string()
+        }
+        _ => percent.bold().cyan().to_string(),
+    };
+
+    match b.status.as_deref().filter(|s| !s.is_empty()) {
+        Some(status) => format!("{colored} {} {}", "·".bright_black(), status.bright_black()),
+        None => colored,
+    }
+}
+
+/// 平均负载：`0.42 0.55 0.48`。
+fn format_load(load: Option<[f32; 3]>) -> String {
+    let Some([one, five, fifteen]) = load else {
+        return unknown();
+    };
+    format!("{one:.2} {five:.2} {fifteen:.2}")
+        .bold()
+        .cyan()
+        .to_string()
+}
+
+/// 把 `Option<&str>` 渲染成「加粗值」或 `Unknown` 的通用小工具。
+fn plain_or_unknown(text: Option<&str>, render: impl Fn(&str) -> String) -> String {
+    text.map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map_or_else(unknown, render)
+}
+
+/// KiB → 人类可读字节数。
+fn humanize_kib(kib: u64) -> String {
+    humanize_bytes(kib.saturating_mul(1024))
+}
+
 /// 一行 8 个色块，展示终端调色板。
-pub fn palette_line() -> String {
-    PALETTE
-        .iter()
-        .map(|color| "●".color(*color).to_string())
-        .collect::<Vec<_>>()
-        .join(" ")
+///
+/// `palette` 是终端真实配色（来自 kitty 配置）；为 `None` 或不是 8 色时，
+/// 退回内置的高亮档色板 —— 普通档的 0 号黑在深色终端上几乎不可见。
+pub fn palette_line(palette: Option<&[(u8, u8, u8)]>) -> String {
+    let swatches: Vec<String> = match palette {
+        Some(colors) if colors.len() == 8 => colors
+            .iter()
+            .map(|&(r, g, b)| "●".color(Color::TrueColor { r, g, b }).to_string())
+            .collect(),
+        _ => PALETTE
+            .iter()
+            .map(|color| "●".color(*color).to_string())
+            .collect(),
+    };
+    swatches.join(" ")
 }
 
 // ════════════════════════════════════════════════════════════════════
@@ -795,36 +1289,35 @@ pub fn print_help() {
             "--json",
             "print every field as JSON instead of the fetch layout",
         ),
+        (
+            "--fields <list>",
+            "only show these comma-separated fields (see FIELDS)",
+        ),
+        ("--short", "show a compact subset of the fields"),
+        ("--no-logo", "hide the logo"),
+        ("--ascii", "disable the truecolor logo gradient"),
+        (
+            "--logo-file <path>",
+            "use a custom logo read from a text file",
+        ),
     ] {
         // 先按纯文本补齐再着色 —— 宽度说明见 `pad` 相关注释。
         println!("  {}{}", format!("{flag:<22}").cyan(), desc);
     }
     println!();
     println!("{}", "FIELDS:".bold());
-    for (label, desc) in [
-        ("OS", "user@host"),
-        ("WM", "running niri compositor version"),
-        (
-            "Structure",
-            "modular (includes) or monolithic config layout",
-        ),
-        ("Config", "niri config file path, size and line count"),
-        (
-            "Output",
-            "primary output resolution, refresh rate and scale",
-        ),
-        (
-            "Bar",
-            "status bar or desktop shell (waybar, noctalia, eww, …)",
-        ),
-        ("Terminal", "terminal emulator, plus the focused window"),
-        ("Font", "font used by that terminal"),
-        ("CPU", "processor model, physical cores and threads"),
-        ("GPU", "graphics cards; the one driving a display is marked"),
-        ("Palette", "8 terminal palette swatches"),
-    ] {
-        println!("  {}{}", format!("{label:<22}").cyan(), desc);
+    for field in Field::ALL {
+        println!(
+            "  {}{}",
+            format!("{:<22}", field.name()).cyan(),
+            field.description()
+        );
     }
+    println!();
+    println!(
+        "  {}",
+        "pass names to --fields, e.g. --fields os,wm,cpu,gpu".bright_black()
+    );
     println!();
     println!("{}", "ENVIRONMENT:".bold());
     for (var, desc) in [
@@ -856,6 +1349,35 @@ pub fn print_unknown_argument(arg: &str) {
         "{} unknown option {}",
         "✗ nirifetch".red().bold(),
         format!("`{arg}`").red()
+    );
+    eprintln!();
+    eprintln!(
+        "  Run {} to see the available options.",
+        "nirifetch --help".cyan()
+    );
+}
+
+/// 选项的取值非法（例如 `--fields` 里出现了不认识的字段名）。
+pub fn print_bad_value(option: &str, value: &str) {
+    eprintln!(
+        "{} invalid value {} for {}",
+        "✗ nirifetch".red().bold(),
+        format!("`{value}`").red(),
+        option.cyan()
+    );
+    eprintln!();
+    eprintln!(
+        "  Field names are listed under FIELDS in {}.",
+        "nirifetch --help".cyan()
+    );
+}
+
+/// 选项缺少必需的取值（例如以 `--fields` 结尾）。
+pub fn print_missing_value(option: &str) {
+    eprintln!(
+        "{} option {} needs a value",
+        "✗ nirifetch".red().bold(),
+        option.cyan()
     );
     eprintln!();
     eprintln!(
@@ -1158,47 +1680,17 @@ mod tests {
     fn every_field_is_capped_by_the_budget() {
         // 「任何一行都不撑破右边界」是结构性保证：即便某个格式化函数忘了
         // 做降级（Structure / Font / Palette 目前就没做），兜底截断也要生效。
-        let info = Info {
-            user: "user".to_owned(),
-            host: "host".to_owned(),
-            home: Some("/home/user".to_owned()),
-            wm: Some("25.05 (1a2b3c4)".to_owned()),
-            structure: "Modular (6 included files)".to_owned(),
-            window: kitty_window(),
-            output: Some(OutputView {
-                name: "DP-1".to_owned(),
-                physical: Some((2560, 1440)),
-                refresh_hz: Some(144.0),
-                scale: Some(1.0),
-                source_label: "Focused",
-                vrr_enabled: Some(true),
-                transform: Some("90°".to_owned()),
-            }),
-            config: ConfigView {
-                path: "/home/user/.config/niri/config.kdl".to_owned(),
-                exists: true,
-                source_label: None,
-                size: Some(6714),
-                lines: Some(135),
-            },
-            bar: Some("Dank Material Shell (DMS)"),
-            terminal: Some("kitty".to_owned()),
-            font: Some("Adwaita Mono".to_owned()),
-            cpu: Some(CpuView {
-                model: "AMD Ryzen 7 5800X3D".to_owned(),
-                logical: 16,
-                physical: Some(8),
-            }),
-            gpus: vec![gpu("AMD HawkPoint1", "amdgpu", true)],
-        };
+        let info = full_info();
 
-        // 从「刚好摆得下」到极窄，逐个预算检查。
+        // 从「刚好摆得下」到极窄，逐个预算检查每个字段。
         for budget in [VALUE_MAX, 40, 24, VALUE_MIN] {
-            for (idx, value) in field_values(&info, budget).iter().enumerate() {
-                let width = plain_width(value);
+            for field in Field::ALL {
+                let value = field_value(field, &info, budget);
+                let width = plain_width(&value);
                 assert!(
                     width <= budget,
-                    "预算 {budget} 下第 {idx} 个字段宽 {width}：{value:?}"
+                    "预算 {budget} 下 {} 字段宽 {width}：{value:?}",
+                    field.name()
                 );
             }
         }
@@ -1266,11 +1758,12 @@ mod tests {
     fn icons_are_exactly_one_cell_wide() {
         // 图标必须是单格宽，否则整个标签列会被挤歪。
         // 这些码位在实测的 Nerd Font 里 advance width 均等于一个字符宽。
-        for (label, icon) in FIELD_LABELS {
+        for field in Field::ALL {
             assert_eq!(
-                display_width(icon),
+                display_width(field.icon()),
                 1,
-                "{label} 的图标不是单格宽，会破坏对齐"
+                "{} 的图标不是单格宽，会破坏对齐",
+                field.name()
             );
         }
         // 图标 + 空格正好占满图标列。
@@ -1279,35 +1772,27 @@ mod tests {
 
     #[test]
     fn palette_line_draws_eight_swatches() {
-        // 无论着色是否开启，色块数量都必须是 8。
-        assert_eq!(palette_line().matches('●').count(), 8);
+        // 无论着色是否开启，色块数量都必须是 8；内置与自定义色板都一样。
+        assert_eq!(palette_line(None).matches('●').count(), 8);
+        let custom = [(1u8, 2u8, 3u8); 8];
+        assert_eq!(palette_line(Some(&custom)).matches('●').count(), 8);
+        // 长度不对的色板退回内置色板，而不是画出乱七八糟的块数。
+        assert_eq!(palette_line(Some(&custom[..3])).matches('●').count(), 8);
     }
 
     #[test]
-    fn field_values_line_up_with_labels() {
-        // 两个定长数组靠下标对应，长度必须一致。
-        let info = Info {
-            user: "user".to_owned(),
-            host: "arch".to_owned(),
-            home: Some("/home/user".to_owned()),
-            wm: Some("26.04".to_owned()),
-            structure: "Monolithic (Single)".to_owned(),
-            window: WindowView::default(),
-            output: None,
-            config: ConfigView {
-                path: "/home/user/.config/niri/config.kdl".to_owned(),
-                exists: true,
-                source_label: None,
-                size: Some(6714),
-                lines: Some(135),
-            },
-            bar: None,
-            terminal: Some("kitty".to_owned()),
-            font: Some("Adwaita Mono".to_owned()),
-            cpu: None,
-            gpus: Vec::new(),
-        };
-        assert_eq!(field_values(&info, 40).len(), FIELD_LABELS.len());
+    fn every_field_has_a_unique_name() {
+        // `--fields` 的解析依赖名字唯一，重名会让其中一个永远选不中。
+        for (i, field) in Field::ALL.iter().enumerate() {
+            for other in &Field::ALL[i + 1..] {
+                assert_ne!(field.name(), other.name(), "字段名重复");
+                assert_ne!(field.label(), other.label(), "字段标签重复");
+            }
+            assert!(Field::from_name(field.name()).is_some());
+        }
+        // 大小写不敏感，且认不出时返回 None。
+        assert_eq!(Field::from_name("GPU"), Some(Field::Gpu));
+        assert_eq!(Field::from_name("nope"), None);
     }
 
     #[test]
@@ -1542,7 +2027,7 @@ mod tests {
     fn logo_is_vertically_centred_against_the_info_column() {
         // 信息栏比 Logo 高，顶部对齐会让左下角空一大块。
         let logo_height = LOGO_ART.len() + 1; // 主体 + 标语
-        let info_height = FIELD_LABELS.len() + 1; // 字段 + 分隔线
+        let info_height = Field::ALL.len() + 1; // 字段 + 分隔线
         assert!(
             info_height > logo_height,
             "本测试假设信息栏更高，若不成立则居中没有意义"
@@ -1628,6 +2113,7 @@ mod tests {
             source_label: None,
             size: Some(6714),
             lines: Some(135),
+            validation: None,
         };
         assert_eq!(
             strip_ansi(&format_config(&view, Some("/home/user"), VALUE_MAX)),
@@ -1643,6 +2129,7 @@ mod tests {
             source_label: None,
             size: Some(6714),
             lines: Some(135),
+            validation: None,
         };
         // 括号整体让位，换来一个完整可辨认的路径。
         let text = strip_ansi(&format_config(&view, Some("/home/user"), 28));
@@ -1663,6 +2150,7 @@ mod tests {
             source_label: Some("system"),
             size: None,
             lines: None,
+            validation: None,
         };
         assert_eq!(
             strip_ansi(&format_config(&view, None, VALUE_MAX)),
@@ -1673,6 +2161,34 @@ mod tests {
             strip_ansi(&format_config(&view, None, 20)),
             "/etc/niri/config.kdl"
         );
+    }
+
+    #[test]
+    fn config_line_renders_the_validation_marker() {
+        let base = ConfigView {
+            path: "/home/user/.config/niri/config.kdl".to_owned(),
+            exists: true,
+            source_label: None,
+            size: Some(6714),
+            lines: Some(135),
+            validation: Some(ValidationView {
+                ok: true,
+                message: None,
+            }),
+        };
+        let ok = strip_ansi(&format_config(&base, Some("/home/user"), VALUE_MAX));
+        assert!(ok.ends_with('✓'), "合法配置应以绿勾收尾：{ok}");
+
+        let bad = ConfigView {
+            validation: Some(ValidationView {
+                ok: false,
+                message: Some("unexpected token".to_owned()),
+            }),
+            ..base
+        };
+        let text = strip_ansi(&format_config(&bad, Some("/home/user"), VALUE_MAX));
+        assert!(text.contains('✗'), "非法配置应有叉号：{text}");
+        assert!(text.contains("unexpected token"), "应显示错误摘要：{text}");
     }
 
     #[test]
@@ -1728,6 +2244,10 @@ mod tests {
                 source_label: None,
                 size: Some(6714),
                 lines: Some(135),
+                validation: Some(ValidationView {
+                    ok: true,
+                    message: None,
+                }),
             },
             bar: Some("Waybar"),
             terminal: Some("kitty".to_owned()),
@@ -1738,6 +2258,34 @@ mod tests {
                 physical: Some(8),
             }),
             gpus: vec![gpu("AMD Radeon RX 6700 XT", "amdgpu", true)],
+            workspace: Some(WorkspaceView {
+                focused_idx: Some(2),
+                total: 3,
+                windows: 2,
+            }),
+            keyboard: Some("English (US)".to_owned()),
+            memory: Some(MemoryView {
+                total_kib: 20_267_444,
+                available_kib: 17_768_624,
+            }),
+            disk: Some(DiskView {
+                mount: "/".to_owned(),
+                used_kib: 39_717_116,
+                total_kib: 243_148_800,
+            }),
+            kernel: Some("Linux 7.2.8-arch1-2".to_owned()),
+            shell: Some("fish".to_owned()),
+            uptime: Some(1047),
+            packages: Some(PackageView {
+                count: 1061,
+                manager: "pacman",
+            }),
+            battery: Some(BatteryView {
+                percent: 85,
+                status: Some("Charging".to_owned()),
+            }),
+            load: Some([0.20, 0.49, 0.38]),
+            palette: Some(vec![(0x1e, 0x1e, 0x2e); 8]),
         }
     }
 
@@ -1749,9 +2297,9 @@ mod tests {
         // 精确锁定 JSON 的 schema：往 `Info` 里加字段却忘了想清楚它该不该
         // 出现在 JSON 里，这条就会失败。
         //
-        // 键比 [`FIELD_LABELS`] 多两个是**有意**的：`user` / `host` 在终端里
-        // 合成一行 `OS`，JSON 里拆成两个键更好用；`home` 根本不是字段行，
-        // 只是把配置路径缩写成 `~/...` 的助手。
+        // 键比字段行多几个是**有意**的：`user` / `host` 在终端里合成一行 `OS`，
+        // JSON 里拆成两个键更好用；`home` 根本不是字段行，只是把配置路径缩写
+        // 成 `~/...` 的助手；`window` 在终端里并进 Terminal 行，JSON 里独立。
         let obj = value.as_object().expect("顶层应当是对象");
         let mut keys: Vec<&str> = obj.keys().map(String::as_str).collect();
         keys.sort_unstable();
@@ -1759,18 +2307,29 @@ mod tests {
             keys,
             [
                 "bar",
+                "battery",
                 "config",
                 "cpu",
+                "disk",
                 "font",
                 "gpus",
                 "home",
                 "host",
+                "kernel",
+                "keyboard",
+                "load",
+                "memory",
                 "output",
+                "packages",
+                "palette",
+                "shell",
                 "structure",
                 "terminal",
+                "uptime",
                 "user",
                 "window",
                 "wm",
+                "workspace",
             ]
         );
 
@@ -1783,8 +2342,12 @@ mod tests {
         assert_eq!(value["gpus"][0]["active"], true);
         assert_eq!(value["window"]["app_id"], "kitty");
         assert_eq!(value["config"]["lines"], 135);
+        assert_eq!(value["config"]["validation"]["ok"], true);
         assert_eq!(value["output"]["physical"], serde_json::json!([2560, 1440]));
         assert_eq!(value["output"]["refresh_hz"], 144.0);
+        assert_eq!(value["workspace"]["focused_idx"], 2);
+        assert_eq!(value["packages"]["manager"], "pacman");
+        assert_eq!(value["load"][0], 0.20);
     }
 
     #[test]
@@ -1836,7 +2399,7 @@ mod tests {
 
     #[test]
     fn json_output_contains_no_ansi_escapes() {
-        // 模型全程是纯文本，着色只发生在 field_values 里 —— 若哪天有人把
+        // 模型全程是纯文本，着色只发生在 field_value 里 —— 若哪天有人把
         // 着色提前到装配阶段，这条会立刻发现。
         let text = json_text(&full_info());
         assert!(!text.contains('\u{1b}'), "JSON 里混进了 ANSI 转义序列");
@@ -1848,7 +2411,7 @@ mod tests {
     fn bar_sits_between_output_and_terminal() {
         // 桌面层级是自上而下的：先讲屏幕（Output），再讲屏幕上的状态栏（Bar），
         // 最后才轮到跑在里面的终端。
-        let labels: Vec<&str> = FIELD_LABELS.iter().map(|(label, _)| *label).collect();
+        let labels: Vec<&str> = Field::ALL.iter().map(|field| field.label()).collect();
         let output = labels
             .iter()
             .position(|l| *l == "Output")

@@ -118,6 +118,28 @@ pub fn process_name(pid: u32) -> Option<String> {
     }
 }
 
+/// 去掉字符串里的 ANSI CSI 转义序列（形如 `ESC [ 参数… m`）。
+///
+/// `niri validate` 会把带颜色的日志写到 stderr，做错误摘要前必须先剥掉转义码，
+/// 否则终端里量宽度、截断全都会把转义字节算进去。
+pub fn strip_ansi(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    let mut in_escape = false;
+    for ch in s.chars() {
+        if in_escape {
+            // CSI 序列以字母收尾，例如 `\x1b[1m` 的 `m`。
+            if ch.is_ascii_alphabetic() {
+                in_escape = false;
+            }
+        } else if ch == '\x1b' {
+            in_escape = true;
+        } else {
+            out.push(ch);
+        }
+    }
+    out
+}
+
 /// 读取文本文件，最多读 `max_bytes` 字节。
 ///
 /// 设上限是为了防御「路径被软链到巨型文件或设备节点」这类意外 ——
@@ -144,6 +166,14 @@ mod tests {
         assert_eq!(env_non_empty("NIRIFETCH_TEST_UNSET_VARIABLE"), None);
         // PATH 一定存在且非空。
         assert!(env_non_empty("PATH").is_some());
+    }
+
+    #[test]
+    fn strip_ansi_removes_csi_sequences() {
+        assert_eq!(strip_ansi("\x1b[1m\x1b[31merror\x1b[0m: bad"), "error: bad");
+        assert_eq!(strip_ansi("plain"), "plain");
+        // 半截转义（没有终结字母）也要能安全处理，绝不 panic。
+        assert_eq!(strip_ansi("\x1b[38"), "");
     }
 
     #[test]

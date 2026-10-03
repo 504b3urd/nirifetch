@@ -13,7 +13,7 @@
 //!    混成器无响应时 `niri msg` 会一直阻塞，若不加超时会把 nirifetch 一起拖住。
 
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::Duration;
 
@@ -23,6 +23,9 @@ use crate::sys;
 
 /// 单次 IPC 调用的超时上限。正常情况这些命令都在毫秒级返回。
 const IPC_TIMEOUT: Duration = Duration::from_millis(1500);
+
+/// `niri validate` 的超时。它会完整解析配置（含全部 include），留宽一点。
+const VALIDATE_TIMEOUT: Duration = Duration::from_millis(3000);
 
 /// 用于识别 niri IPC socket 的文件名特征：`niri.<wayland_display>.<pid>.sock`
 const SOCKET_PREFIX: &str = "niri.";
@@ -264,6 +267,96 @@ impl OutputSource {
 }
 
 // ════════════════════════════════════════════════════════════════════
+//  工作区 / 键盘布局
+// ════════════════════════════════════════════════════════════════════
+
+/// `niri msg --json workspaces` 里单个工作区的精简模型。
+///
+/// 只解析挑选「当前工作区」与计数所需的最小字段。niri 的 JSON 里还有
+/// `output` / `name` / `active_window_id` 等，界面用不到就不解析 ——
+/// serde 默认忽略未知字段，少解析一项就少一处随版本失效的风险。
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct WorkspaceInfo {
+    /// 工作区序号（从 1 开始）。界面展示 `#N`。
+    #[serde(default)]
+    pub idx: usize,
+    /// 是否是当前聚焦的工作区。
+    #[serde(default)]
+    pub is_focused: bool,
+}
+
+/// `niri msg --json keyboard-layouts` 的返回结构。
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct KeyboardLayouts {
+    #[serde(default)]
+    pub names: Vec<String>,
+    #[serde(default)]
+    pub current_idx: usize,
+}
+
+impl KeyboardLayouts {
+    /// 当前生效的键盘布局名。索引越界时返回 `None`。
+    pub fn current(&self) -> Option<&str> {
+        self.names
+            .get(self.current_idx)
+            .map(String::as_str)
+            .map(str::trim)
+            .filter(|name| !name.is_empty())
+    }
+}
+
+/// `niri validate` 的结果。
+#[derive(Debug, Clone)]
+pub struct ConfigValidation {
+    /// 配置是否合法。
+    pub ok: bool,
+    /// 非法时的首条错误摘要（已剥掉 ANSI 与日志前缀）。
+    pub message: Option<String>,
+}
+
+/// 调用 `niri validate -c <path>` 校验配置。
+///
+/// 返回 `None` 表示**没法校验**（niri 未安装、调用超时），与「校验失败」是
+/// 两回事：前者 UI 不显示任何标记，后者显示一个红色 `✗`。
+pub fn validate_config(config: &Path) -> Option<ConfigValidation> {
+    let mut cmd = Command::new("niri");
+    cmd.arg("validate").arg("-c").arg(config);
+    let out = sys::run(&mut cmd, VALIDATE_TIMEOUT)?;
+
+    if out.status.success() {
+        return Some(ConfigValidation {
+            ok: true,
+            message: None,
+        });
+    }
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    Some(ConfigValidation {
+        ok: false,
+        message: extract_error(&stderr),
+    })
+}
+
+/// 从 `niri validate` 的 stderr 里挑出首条错误摘要。
+///
+/// 输出里混着带颜色的日志行（`2026-… DEBUG niri_config: loaded config`）与
+/// 多行错误框；先剥 ANSI，再取第一条含 `error` 的行，去掉 `Error:` 前缀。
+fn extract_error(stderr: &str) -> Option<String> {
+    stderr
+        .lines()
+        .map(sys::strip_ansi)
+        .map(|line| line.trim().to_owned())
+        .find(|line| line.to_ascii_lowercase().contains("error"))
+        .map(|line| {
+            let rest = line
+                .strip_prefix("Error:")
+                .or_else(|| line.strip_prefix("error:"))
+                .unwrap_or(&line);
+            rest.trim().to_owned()
+        })
+        .filter(|line| !line.is_empty())
+}
+
+// ════════════════════════════════════════════════════════════════════
 //  IPC 客户端
 // ════════════════════════════════════════════════════════════════════
 
@@ -367,6 +460,26 @@ impl NiriIpc {
             OutputSource::First
         };
         Some((all.remove(0), source))
+    }
+
+    /// 全部工作区。失败时返回空列表。
+    pub fn workspaces(&self) -> Vec<WorkspaceInfo> {
+        let Some(v) = self.json(&["workspaces"]) else {
+            return Vec::new();
+        };
+        serde_json::from_value(v).unwrap_or_default()
+    }
+
+    /// 打开窗口的数量。IPC 失败时返回 `None`（与「0 个窗口」区分开）。
+    pub fn window_count(&self) -> Option<usize> {
+        let v = self.json(&["windows"])?;
+        v.as_array().map(Vec::len)
+    }
+
+    /// 配置的键盘布局。
+    pub fn keyboard_layouts(&self) -> Option<KeyboardLayouts> {
+        let v = self.json(&["keyboard-layouts"])?;
+        serde_json::from_value(v).ok()
     }
 }
 
@@ -525,5 +638,63 @@ mod tests {
         assert!(!desktop_is_niri(""));
         // 不能被同前缀的名字骗过去。
         assert!(!desktop_is_niri("nirim"));
+    }
+
+    #[test]
+    fn keyboard_layout_reports_the_current_one() {
+        let layouts = KeyboardLayouts {
+            names: vec!["English (US)".to_owned(), "Chinese".to_owned()],
+            current_idx: 1,
+        };
+        assert_eq!(layouts.current(), Some("Chinese"));
+
+        // 索引越界不能 panic。
+        assert_eq!(
+            KeyboardLayouts {
+                names: vec!["English (US)".to_owned()],
+                current_idx: 9,
+            }
+            .current(),
+            None
+        );
+        // 空名字等同于没有。
+        assert_eq!(
+            KeyboardLayouts {
+                names: vec!["  ".to_owned()],
+                current_idx: 0,
+            }
+            .current(),
+            None
+        );
+    }
+
+    #[test]
+    fn extracts_the_first_error_from_validate_output() {
+        // 真实输出里混着带颜色的日志行，取第一条含 error 的行并剥掉前缀。
+        let stderr = "\
+\x1b[2m2026-10-03T05:30:54Z\x1b[0m \x1b[34mDEBUG\x1b[0m \x1b[2mniri_config\x1b[0m loaded config
+\x1b[1m\x1b[31mError:\x1b[0m   × found `{`, expected `\"`
+  │ or whitespace
+";
+        assert_eq!(
+            extract_error(stderr).as_deref(),
+            Some("× found `{`, expected `\"`")
+        );
+        // 没有 error 行时返回 None，不编造摘要。
+        assert_eq!(extract_error("config is valid\n"), None);
+    }
+
+    #[test]
+    fn workspace_info_ignores_unknown_fields() {
+        // 只解析关心的字段，多出来的键不应导致反序列化失败。
+        let json = r#"[
+            {"id":2,"idx":2,"name":null,"output":"eDP-1","is_focused":true,"active_window_id":5},
+            {"id":1,"idx":1,"is_focused":false}
+        ]"#;
+        let spaces: Vec<WorkspaceInfo> = serde_json::from_str(json).expect("应当能解析");
+        assert_eq!(spaces.len(), 2);
+        assert_eq!(spaces[0].idx, 2);
+        assert!(spaces[0].is_focused);
+        assert!(!spaces[1].is_focused);
     }
 }

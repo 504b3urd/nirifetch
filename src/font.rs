@@ -332,6 +332,81 @@ fn resolve_include(base_dir: &Path, include: &str) -> PathBuf {
     }
 }
 
+/// 从 kitty 配置读取终端调色板（`color0`–`color7`）。
+///
+/// 只有终端是 kitty 且 8 个基础色都能读到才返回 `Some`；否则返回 `None`，
+/// 由 UI 退回内置的高亮色板。主文件缺失的颜色会尝试到 `include` 的文件里补齐。
+pub fn terminal_palette(terminal: Option<&str>) -> Option<Vec<(u8, u8, u8)>> {
+    if !terminal.is_some_and(|name| name.eq_ignore_ascii_case("kitty")) {
+        return None;
+    }
+    let dir = kitty_config_dir()?;
+    let text = sys::read_capped(&dir.join("kitty.conf"), MAX_CONFIG_BYTES)?;
+
+    let mut palette = [None; 8];
+    fill_palette(&mut palette, &text);
+    if palette.iter().any(Option::is_none) {
+        for include in included_files(&text).into_iter().take(MAX_INCLUDES) {
+            if let Some(body) = sys::read_capped(&resolve_include(&dir, &include), MAX_CONFIG_BYTES)
+            {
+                fill_palette(&mut palette, &body);
+            }
+            if palette.iter().all(Option::is_some) {
+                break;
+            }
+        }
+    }
+    palette.into_iter().collect()
+}
+
+/// 把一份配置正文里的 `colorN #rrggbb` 填进色板，已在的槽位不覆盖。
+fn fill_palette(palette: &mut [Option<(u8, u8, u8)>; 8], text: &str) {
+    for line in text.lines() {
+        let line = line.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        let Some((name, value)) = split_directive_pair(line) else {
+            continue;
+        };
+        let Some(idx) = name
+            .strip_prefix("color")
+            .and_then(|n| n.parse::<usize>().ok())
+        else {
+            continue;
+        };
+        if idx >= 8 || palette[idx].is_some() {
+            continue;
+        }
+        if let Some(rgb) = parse_hex_color(value) {
+            palette[idx] = Some(rgb);
+        }
+    }
+}
+
+/// 把一行拆成 `(键, 值)`：`=` 优先，其次按空白分隔。
+///
+/// 先认 `=` 是因为 `color1 = #f38ba8` 这种写法按空白切会把 `=` 留在值里。
+fn split_directive_pair(line: &str) -> Option<(&str, &str)> {
+    if let Some((name, value)) = line.split_once('=') {
+        return Some((name.trim(), value.trim()));
+    }
+    let (name, value) = line.split_once(char::is_whitespace)?;
+    Some((name.trim(), value.trim()))
+}
+
+/// 解析 `#rrggbb` / `rrggbb`（可带引号）为 RGB 三元组。
+fn parse_hex_color(raw: &str) -> Option<(u8, u8, u8)> {
+    let hex = raw.trim().trim_matches(['"', '\'']).trim_start_matches('#');
+    if hex.len() != 6 || !hex.chars().all(|c| c.is_ascii_hexdigit()) {
+        return None;
+    }
+    let r = u8::from_str_radix(&hex[0..2], 16).ok()?;
+    let g = u8::from_str_radix(&hex[2..4], 16).ok()?;
+    let b = u8::from_str_radix(&hex[4..6], 16).ok()?;
+    Some((r, g, b))
+}
+
 /// 读 GNOME 的界面字体设置。
 ///
 /// 注意这是**桌面**的字体偏好，不一定等于终端实际使用的字体 ——
@@ -565,6 +640,47 @@ font_size 15
         assert_eq!(included_files(KITTY_CONF), vec!["themes/frappe.conf"]);
         assert!(included_files("font_family X").is_empty());
         assert!(included_files("# include nope.conf").is_empty());
+    }
+
+    #[test]
+    fn parses_hex_colours() {
+        assert_eq!(parse_hex_color("#1e1e2e"), Some((0x1e, 0x1e, 0x2e)));
+        assert_eq!(parse_hex_color("1e1e2e"), Some((0x1e, 0x1e, 0x2e)));
+        assert_eq!(parse_hex_color("  \"#ABCDEF\"  "), Some((0xAB, 0xCD, 0xEF)));
+        // 长度不对、含非法字符都要安静失败。
+        assert_eq!(parse_hex_color("#fff"), None);
+        assert_eq!(parse_hex_color("#gggggg"), None);
+        assert_eq!(parse_hex_color(""), None);
+    }
+
+    #[test]
+    fn builds_a_palette_from_colour_directives() {
+        let text = "\
+color0 #1e1e2e
+color1 = #f38ba8
+# color2 #000000 这一行是注释，不生效
+color3 #a6e3a1
+";
+        let mut palette = [None; 8];
+        fill_palette(&mut palette, text);
+        assert_eq!(palette[0], Some((0x1e, 0x1e, 0x2e)));
+        assert_eq!(palette[1], Some((0xf3, 0x8b, 0xa8)));
+        assert_eq!(palette[2], None, "被注释的颜色不应生效");
+        assert_eq!(palette[3], Some((0xa6, 0xe3, 0xa1)));
+        // 缺色时整体不可用，让 UI 退回内置色板。
+        assert!(
+            palette.into_iter().collect::<Option<Vec<_>>>().is_none(),
+            "缺色的色板不应被采用"
+        );
+    }
+
+    #[test]
+    fn first_palette_definition_wins() {
+        // 主文件已给定时，include 里的同号颜色不该覆盖它。
+        let mut palette = [None; 8];
+        fill_palette(&mut palette, "color0 #111111\n");
+        fill_palette(&mut palette, "color0 #222222\n");
+        assert_eq!(palette[0], Some((0x11, 0x11, 0x11)));
     }
 
     #[test]

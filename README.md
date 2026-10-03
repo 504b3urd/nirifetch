@@ -11,23 +11,36 @@ Most fetch tools treat the compositor as an afterthought. nirifetch talks to nir
                           ─────────  ────────────────────────────────────────────
   _   _ ___ ____  ___     WM         Niri 25.05 (1a2b3c4)
  | \ | |_ _|  _ \|_ _|    Structure  Modular (3 included files)
- |  \| || || |_) || |     Config     ~/.config/niri/config.kdl (5.2 KiB · 120 lines)
+ |  \| || || |_) || |     Config     ~/.config/niri/config.kdl (5.2 KiB · 120 lines) ✓
  | |\  || ||  _ < | |     Output     DP-1 (2560x1440@144Hz · Scale 1x · Focused)
  |_| \_|___|_| \_\___|    Bar        Waybar
   ~ endless scroll ~      Terminal   foot (Window: 笔记 — nvim)
                           Font       JetBrains Mono
+                          Workspace  2 of 3 · 4 windows
+                          Keyboard   English (US)
                           CPU        AMD Ryzen 5 5600X (6 cores / 12 threads)
                           GPU        AMD Radeon RX 6700 XT (amdgpu)
+                          Memory     6.1 GiB / 19.3 GiB
+                          Disk       37.9 GiB / 231.9 GiB · 16%
+                          Kernel     Linux 6.12.4-arch1-1
+                          Shell      fish
+                          Uptime     3d 4h
+                          Packages   1061 (pacman)
+                          Battery    85% · Charging
+                          Load       0.20 0.49 0.38
                           Palette    ● ● ● ● ● ● ● ●
 ```
 
-*(Illustrative example, re-indented by two columns to fit this page — your output reflects your own session. Note the CJK window title: it is measured as double-width when aligning the row.)*
+*(Illustrative example, re-indented by two columns to fit this page — your output reflects your own session. Note the CJK window title: it is measured as double-width when aligning the row. Use `--short` for a compact subset, or `--fields …` to pick your own.)*
+
 
 ## Features
 
-- **Fast.** ~65 ms end to end, and roughly 0 ms of that is nirifetch's own probing. Hardware data comes straight from `procfs` and `sysfs`; nothing shells out to `lspci`, `lscpu` or friends.
+- **Fast, and parallel.** Every probe — niri IPC, hardware, font, config validation — is independent and runs on its own thread, so the wall-clock cost is the slowest probe rather than their sum. End to end it stays well under a tenth of a second, and roughly 0 ms of that is nirifetch's own computation. Hardware data comes straight from `procfs` and `sysfs`; nothing shells out to `lspci`, `lscpu` or friends.
+- **More than the compositor.** Alongside the niri session it reports the focused workspace and window count, the active keyboard layout, and whether `niri validate` accepts your config (a quiet `✓`, or a `✗` with the first error). It also fills in the classic fields — kernel, uptime, load, shell, memory, disk, installed packages, battery — from procfs/sysfs, plus your terminal's real palette when it can read it.
 - **Config structure detection.** Scans `config.kdl` for `include` statements and reports `Modular (N included files)` or `Monolithic (Single)`. Backup and editor droppings (`config.kdl.bak`, `.#binds.kdl`) are filtered out so a stray `cp` doesn't flip the verdict.
 - **Status bar detection.** Reports the bar or shell niri launched — Waybar, Noctalia Shell, Dank Material Shell, Eww, Ironbar, AGS — by reading the `spawn-at-startup` directives out of your config, **including every file it `include`s**. Falls back to scanning `/proc` for anyone who starts their bar from a systemd user unit instead. Keybinds that reference a bar (`spawn-sh "pkill waybar"`) are never mistaken for one.
+- **Pick your own layout.** `--fields os,cpu,gpu` shows exactly the fields you want, `--short` prints a compact subset, and `--no-logo` / `--ascii` / `--logo-file <path>` put the left column under your control.
 - **Narrow-terminal safe.** Every value is measured in display cells and degraded in priority order before anything is cut. No row ever wraps or breaks the column alignment — verified from 46 to 220 columns.
 - **Real Nerd Font width accounting.** Icon codepoints were measured against actual font tables, so labels and values line up whether or not icons are enabled. CJK titles are measured as double-width.
 - **No heavyweight dependencies.** `serde`, `serde_json` and `colored`. No async runtime, no `sysinfo`, no `lspci` parsing library.
@@ -66,10 +79,14 @@ makepkg -si          # -s installs missing makedepends, -i installs the result
 ## Usage
 
 ```sh
-nirifetch              # print the fetch
-nirifetch --json       # same data as JSON, for scripts
-nirifetch --help       # list every field and environment variable
-nirifetch -v           # print the version
+nirifetch                    # print the fetch
+nirifetch --json             # same data as JSON, for scripts
+nirifetch --short            # a compact subset of the fields
+nirifetch --fields os,cpu,gpu  # show exactly these fields, in this order
+nirifetch --no-logo          # hide the left column
+nirifetch --logo-file art.txt  # use your own logo
+nirifetch --help             # list every field and environment variable
+nirifetch -v                 # print the version
 ```
 
 Interested in adding it to your shell greeting? Call it from `~/.config/fish/config.fish`, `~/.zshrc`, or a niri `spawn-at-startup` — it's fast enough that the cost is invisible.
@@ -100,14 +117,15 @@ Unknown options are a usage error (exit `2`) rather than being silently ignored 
 
 | Module | Responsibility |
 | --- | --- |
-| `src/main.rs` | Env checks and orchestration only |
-| `src/ipc.rs` | Niri dynamic state via `niri msg --json` |
+| `src/main.rs` | CLI parsing, env checks and orchestration (parallel probing) |
+| `src/ipc.rs` | Niri dynamic state via `niri msg --json`, plus `niri validate` |
 | `src/config.rs` | `config.kdl` path, size, line count, structure detection, `include` expansion |
 | `src/bar.rs` | Status bar / shell: config `spawn-at-startup` directives, then `/proc` |
 | `src/hardware.rs` | CPU from `/proc/cpuinfo`, GPUs from `/sys/class/drm` + `pci.ids` |
-| `src/font.rs` | Terminal from the process tree, font from the terminal's own config |
+| `src/system.rs` | Kernel, uptime, load, shell, memory, disk, packages, battery |
+| `src/font.rs` | Terminal from the process tree, font and palette from the terminal's own config |
 | `src/sys.rs` | Shared primitives: subprocesses with timeouts, capped file reads |
-| `src/ui.rs` | Logo, column layout, colors, palette, JSON rendering, help text |
+| `src/ui.rs` | Logo, column layout, field selection, colors, palette, JSON rendering, help text |
 
 Every subprocess call is wrapped in a timeout, so an unresponsive compositor or a hung D-Bus daemon can't wedge the program.
 
@@ -126,7 +144,7 @@ Without `hwdata` installed, step 1 and 2 are unavailable and names fall back to 
 ## Development
 
 ```sh
-cargo test        # 171 tests, no network or special hardware needed
+cargo test        # 193 tests, no network or special hardware needed
 cargo clippy --all-targets
 cargo fmt
 ```

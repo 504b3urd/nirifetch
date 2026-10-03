@@ -1,17 +1,21 @@
 //! nirifetch —— 面向 Niri Wayland 混成器的轻量级 fetch 工具。
 //!
-//! 本文件只做两件事：**环境检测** 与 **流程编排**。具体职责被拆到各模块：
+//! 本文件只做三件事：**环境检测**、**命令行解析** 与 **流程编排**。具体职责被拆到各模块：
 //!
-//! - [`ipc`]      ：向运行中的 niri 索取动态状态（`niri msg --json ...`）
+//! - [`ipc`]      ：向运行中的 niri 索取动态状态（`niri msg --json ...`）与配置校验
 //! - [`config`]   ：读取 `~/.config/niri/config.kdl` 的静态元信息
 //! - [`bar`]      ：状态栏 / 桌面外壳（先查配置里的 spawn 指令，再查进程）
 //! - [`hardware`] ：CPU / GPU（几乎全部来自 procfs 与 sysfs）
-//! - [`font`]     ：终端与它使用的字体（进程链 + 终端自身配置）
+//! - [`system`]   ：内核 / 运行时长 / 负载 / Shell / 内存 / 磁盘 / 包 / 电池
+//! - [`font`]     ：终端、它使用的字体，以及终端调色板（进程链 + 终端自身配置）
 //! - [`sys`]      ：上面几个模块共用的底层原语（带超时的子进程、限长读文件）
-//! - [`ui`]       ：Logo、左右分栏排版、调色板与提示文案
+//! - [`ui`]       ：Logo、左右分栏排版、字段选择、调色板与提示文案
 //!
 //! 设计原则是 **永不 panic**：任何一步失败都退化成 `Unknown` / `None`
 //! 并继续渲染。全文件不出现 `unwrap()` / `expect()` / 越界下标。
+//!
+//! 性能：所有探测（IPC / 硬件 / 字体 / 配置校验）互相独立，在 [`collect`] 里
+//! 用 `std::thread::scope` 并行执行，最坏延迟由「最慢的一项」而不是「各项之和」决定。
 
 mod bar;
 mod config;
@@ -19,12 +23,16 @@ mod font;
 mod hardware;
 mod ipc;
 mod sys;
+mod system;
 mod ui;
 
+use std::io::Write as _;
+use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 use ipc::NiriIpc;
 use sys::env_non_empty;
+use ui::Field;
 
 /// 成功退出。
 const EXIT_OK: ExitCode = ExitCode::SUCCESS;
@@ -47,7 +55,15 @@ fn main() -> ExitCode {
         }
         Invocation::Unknown(arg) => {
             ui::print_unknown_argument(&arg);
-            return ExitCode::from(EXIT_USAGE_CODE);
+            return usage_error();
+        }
+        Invocation::BadValue { option, value } => {
+            ui::print_bad_value(option, &value);
+            return usage_error();
+        }
+        Invocation::MissingValue(option) => {
+            ui::print_missing_value(option);
+            return usage_error();
         }
         Invocation::Fetch(options) => options,
     };
@@ -68,10 +84,15 @@ fn main() -> ExitCode {
     if options.json {
         ui::print_json(&info);
     } else {
-        ui::render(&info);
+        ui::render(&info, &build_layout(&options));
     }
 
     EXIT_OK
+}
+
+/// 用法错误的退出码。
+fn usage_error() -> ExitCode {
+    ExitCode::from(EXIT_USAGE_CODE)
 }
 
 // ════════════════════════════════════════════════════════════════════
@@ -79,10 +100,20 @@ fn main() -> ExitCode {
 // ════════════════════════════════════════════════════════════════════
 
 /// 抓取时的开关。
-#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
 struct Options {
     /// `--json`：跳过排版，输出结构化数据。
     json: bool,
+    /// `--fields <list>`：只显示这些字段（保持给定顺序）。
+    fields: Option<Vec<Field>>,
+    /// `--short`：只显示精简字段集。
+    short: bool,
+    /// `--no-logo`：不画 Logo。
+    no_logo: bool,
+    /// `--ascii`：关闭 Logo 的真彩色渐变。
+    ascii: bool,
+    /// `--logo-file <path>`：用文件内容作为自定义 Logo。
+    logo_file: Option<PathBuf>,
 }
 
 /// 一次调用的走向。
@@ -93,39 +124,84 @@ enum Invocation {
     Fetch(Options),
     /// 认不出的参数（原样带出来，用于报错文案）。
     Unknown(String),
+    /// 选项取值非法（例如 `--fields` 里的字段名不存在）。
+    BadValue {
+        option: &'static str,
+        value: String,
+    },
+    /// 选项缺少必需的取值。
+    MissingValue(&'static str),
 }
 
 /// 解析命令行参数。
 ///
-/// 手写而不是引入 `clap`：nirifetch 一共只有三个开关，而 clap 会给一个端到端
+/// 手写而不是引入 `clap`：nirifetch 的开关很少，而 clap 会给一个端到端
 /// 65ms 的工具加上几百 KB 依赖和可感知的参数解析开销 —— 与「轻量」这个立项
 /// 理由直接冲突。
 ///
 /// 判定顺序：`-h/--help` 一旦出现立即生效（它是「告诉我怎么用」的请求，
-/// 不该被别的参数或拼写错误挡住）；其次是不认识的参数；再次是 `--version`；
-/// 都轮不上才是正常抓取。
+/// 不该被别的参数或拼写错误挡住）；其次是取值错误与不认识的参数；再次是
+/// `--version`；都轮不上才是正常抓取。
 ///
 /// 写成接收迭代器的纯函数，是为了能脱离真实进程参数直接测试。
 fn parse_args<I: IntoIterator<Item = String>>(args: I) -> Invocation {
     let mut options = Options::default();
     let mut wants_version = false;
     let mut unknown: Option<String> = None;
+    let mut bad: Option<Invocation> = None;
 
-    for arg in args {
+    let mut iter = args.into_iter();
+    while let Some(arg) = iter.next() {
         match arg.as_str() {
             "-h" | "--help" => return Invocation::Help,
             // `-v` 是用户最顺手的写法，`-V` 是不少工具的历史习惯，都认。
             "-v" | "-V" | "--version" => wants_version = true,
             "--json" => options.json = true,
-            // 只留第一个：一次报一个错比刷一屏更好读。
+            "--no-logo" => options.no_logo = true,
+            "--ascii" => options.ascii = true,
+            "--short" => options.short = true,
+            "--fields" => match iter.next() {
+                Some(value) => match parse_fields(&value) {
+                    Ok(fields) => options.fields = Some(fields),
+                    Err(value) => set_bad(
+                        &mut bad,
+                        Invocation::BadValue {
+                            option: "--fields",
+                            value,
+                        },
+                    ),
+                },
+                None => set_bad(&mut bad, Invocation::MissingValue("--fields")),
+            },
+            "--logo-file" => match iter.next() {
+                Some(value) => options.logo_file = Some(PathBuf::from(value)),
+                None => set_bad(&mut bad, Invocation::MissingValue("--logo-file")),
+            },
             other => {
-                if unknown.is_none() {
+                if let Some(value) = other.strip_prefix("--fields=") {
+                    match parse_fields(value) {
+                        Ok(fields) => options.fields = Some(fields),
+                        Err(value) => set_bad(
+                            &mut bad,
+                            Invocation::BadValue {
+                                option: "--fields",
+                                value,
+                            },
+                        ),
+                    }
+                } else if let Some(value) = other.strip_prefix("--logo-file=") {
+                    options.logo_file = Some(PathBuf::from(value));
+                } else if unknown.is_none() {
+                    // 只留第一个：一次报一个错比刷一屏更好读。
                     unknown = Some(other.to_owned());
                 }
             }
         }
     }
 
+    if let Some(bad) = bad {
+        return bad;
+    }
     if let Some(arg) = unknown {
         return Invocation::Unknown(arg);
     }
@@ -135,32 +211,206 @@ fn parse_args<I: IntoIterator<Item = String>>(args: I) -> Invocation {
     Invocation::Fetch(options)
 }
 
+/// 记下第一个用法错误（后面的不再覆盖）。
+fn set_bad(slot: &mut Option<Invocation>, value: Invocation) {
+    if slot.is_none() {
+        *slot = Some(value);
+    }
+}
+
+/// 解析 `--fields` 的取值：逗号分隔的字段名，保持给定顺序并去重。
+fn parse_fields(value: &str) -> Result<Vec<Field>, String> {
+    let mut fields = Vec::new();
+    for part in value.split(',') {
+        let part = part.trim();
+        if part.is_empty() {
+            continue;
+        }
+        let Some(field) = Field::from_name(part) else {
+            return Err(part.to_owned());
+        };
+        if !fields.contains(&field) {
+            fields.push(field);
+        }
+    }
+    if fields.is_empty() {
+        Err(value.trim().to_owned())
+    } else {
+        Ok(fields)
+    }
+}
+
+/// 根据命令行开关构造渲染布局。
+fn build_layout(options: &Options) -> ui::Layout {
+    let fields = if let Some(fields) = &options.fields {
+        fields.clone()
+    } else if options.short {
+        Field::SHORT.to_vec()
+    } else {
+        Field::ALL.to_vec()
+    };
+
+    let logo = if options.no_logo {
+        ui::Logo::None
+    } else if let Some(path) = &options.logo_file {
+        match read_logo_file(path) {
+            Some(lines) => ui::Logo::Custom(lines),
+            None => {
+                warn(&format!(
+                    "could not read logo file {}; using the built-in logo",
+                    path.display()
+                ));
+                ui::Logo::Niri
+            }
+        }
+    } else {
+        ui::Logo::Niri
+    };
+
+    ui::Layout {
+        fields,
+        logo,
+        ascii: options.ascii,
+    }
+}
+
+/// 读取自定义 Logo：按行切分，丢掉空行，保留行内空白。
+fn read_logo_file(path: &Path) -> Option<Vec<String>> {
+    let bytes = std::fs::read(path).ok()?;
+    let text = String::from_utf8_lossy(&bytes);
+    let lines: Vec<String> = text
+        .lines()
+        .map(|line| line.trim_end().to_owned())
+        .filter(|line| !line.is_empty())
+        .collect();
+    (!lines.is_empty()).then_some(lines)
+}
+
+/// 往 stderr 写一句警告，写不进去也安静收场（不 panic）。
+fn warn(message: &str) {
+    let _ = writeln!(std::io::stderr(), "nirifetch: {message}");
+}
+
+// ════════════════════════════════════════════════════════════════════
+//  采集
+// ════════════════════════════════════════════════════════════════════
+
 /// 采集全部展示数据。
 ///
-/// 这里刻意做成「尽力而为」：每个字段独立失败、独立兜底，互不影响 ——
-/// 比如 IPC 断开时窗口信息变成 `None`，但配置文件路径照常显示。
+/// 所有探测互相独立，用 `std::thread::scope` 并行执行；每个字段独立失败、
+/// 独立兜底，互不影响 —— 比如 IPC 断开时窗口信息变成 `None`，但配置文件
+/// 路径照常显示。配置要先探测（其余多项依赖它），所以它留在 scope 之外。
 fn collect(client: &NiriIpc) -> ui::Info {
-    // 配置只探测一次，架构判定与路径 / 大小 / 行数都来自同一份快照，
-    // 避免两次 `inspect()` 之间文件被改动导致前后不一致。
+    // 配置只探测一次，架构判定、路径 / 大小 / 行数、以及给 bar 扫描的正文
+    // 都来自同一份快照，避免两次读取之间文件被改动导致前后不一致。
     let config = config::inspect();
-    let terminal = font::probe();
+
+    let (
+        terminal,
+        wm,
+        window,
+        output,
+        cpu,
+        gpus,
+        bar,
+        workspace,
+        keyboard,
+        validation,
+        memory,
+        disk,
+        kernel,
+        shell,
+        uptime,
+        packages,
+        battery,
+        load,
+    ) = std::thread::scope(|scope| {
+        let terminal = scope.spawn(font::probe);
+        let wm = scope.spawn(|| compositor_version(client));
+        let window = scope.spawn(|| focused_window(client));
+        let output = scope.spawn(|| primary_output(client));
+        let cpu = scope.spawn(cpu_view);
+        let gpus = scope.spawn(gpu_views);
+        let bar = scope.spawn(|| bar::probe(&config));
+        let workspace = scope.spawn(|| workspace_view(client));
+        let keyboard = scope.spawn(|| keyboard_view(client));
+        let validation = scope.spawn(|| ipc::validate_config(&config.path));
+        let memory = scope.spawn(system::memory);
+        let disk = scope.spawn(|| system::disk("/"));
+        let kernel = scope.spawn(system::kernel);
+        let shell = scope.spawn(system::shell);
+        let uptime = scope.spawn(system::uptime_seconds);
+        let packages = scope.spawn(system::packages);
+        let battery = scope.spawn(system::battery);
+        let load = scope.spawn(system::load);
+
+        // 各闭包都不会 panic；即便真的 panic 了，`join().unwrap_or_default()`
+        // 也只会把该字段退化成 `None`，不会把整个进程带崩。
+        (
+            terminal.join().unwrap_or_default(),
+            wm.join().unwrap_or_default(),
+            window.join().unwrap_or_default(),
+            output.join().unwrap_or_default(),
+            cpu.join().unwrap_or_default(),
+            gpus.join().unwrap_or_default(),
+            bar.join().unwrap_or_default(),
+            workspace.join().unwrap_or_default(),
+            keyboard.join().unwrap_or_default(),
+            validation.join().unwrap_or_default(),
+            memory.join().unwrap_or_default(),
+            disk.join().unwrap_or_default(),
+            kernel.join().unwrap_or_default(),
+            shell.join().unwrap_or_default(),
+            uptime.join().unwrap_or_default(),
+            packages.join().unwrap_or_default(),
+            battery.join().unwrap_or_default(),
+            load.join().unwrap_or_default(),
+        )
+    });
+
+    // 调色板依赖已识别出的终端，放在并行段之后（只是读一个小配置文件）。
+    let palette = font::terminal_palette(terminal.terminal.as_deref());
 
     ui::Info {
         user: username(),
         host: hostname(),
         home: env_non_empty("HOME"),
-        wm: compositor_version(client),
+        wm,
         structure: config.structure.to_string(),
-        window: focused_window(client),
-        output: primary_output(client),
-        config: config_view(&config),
+        window,
+        output,
+        config: config_view(&config, validation),
         // 复用上面那份配置快照：状态栏常常是配置里 spawn 起来的，
         // 顺手把已经读进内存的正文扫一遍，不额外产生文件 IO。
-        bar: bar::probe(&config),
+        bar,
         terminal: terminal.terminal,
         font: terminal.font,
-        cpu: cpu_view(),
-        gpus: gpu_views(),
+        cpu,
+        gpus,
+        workspace,
+        keyboard,
+        memory: memory.map(|m| ui::MemoryView {
+            total_kib: m.total_kib,
+            available_kib: m.available_kib,
+        }),
+        disk: disk.map(|d| ui::DiskView {
+            mount: d.mount,
+            used_kib: d.used_kib,
+            total_kib: d.total_kib,
+        }),
+        kernel,
+        shell,
+        uptime,
+        packages: packages.map(|p| ui::PackageView {
+            count: p.count,
+            manager: p.manager,
+        }),
+        battery: battery.map(|b| ui::BatteryView {
+            percent: b.percent,
+            status: b.status,
+        }),
+        load,
+        palette,
     }
 }
 
@@ -183,6 +433,33 @@ fn gpu_views() -> Vec<ui::GpuView> {
             active: gpu.active,
         })
         .collect()
+}
+
+/// 当前工作区与窗口统计。
+///
+/// 工作区列表与窗口数都取不到时返回 `None`（UI 显示 `Unknown`）。
+fn workspace_view(client: &NiriIpc) -> Option<ui::WorkspaceView> {
+    let workspaces = client.workspaces();
+    let windows = client.window_count();
+    if workspaces.is_empty() && windows.is_none() {
+        return None;
+    }
+    let focused_idx = workspaces
+        .iter()
+        .find(|workspace| workspace.is_focused)
+        .map(|workspace| workspace.idx);
+    Some(ui::WorkspaceView {
+        focused_idx,
+        total: workspaces.len(),
+        windows: windows.unwrap_or(0),
+    })
+}
+
+/// 当前键盘布局名。
+fn keyboard_view(client: &NiriIpc) -> Option<String> {
+    client
+        .keyboard_layouts()
+        .and_then(|layouts| layouts.current().map(str::to_owned))
 }
 
 /// WM 版本号，三级回退：
@@ -235,7 +512,10 @@ fn primary_output(client: &NiriIpc) -> Option<ui::OutputView> {
 }
 
 /// niri 配置文件的展示数据。
-fn config_view(info: &config::ConfigInfo) -> ui::ConfigView {
+fn config_view(
+    info: &config::ConfigInfo,
+    validation: Option<ipc::ConfigValidation>,
+) -> ui::ConfigView {
     ui::ConfigView {
         // `display()` 对非 UTF-8 路径做有损转换，不会 panic。
         path: info.path.display().to_string(),
@@ -246,6 +526,10 @@ fn config_view(info: &config::ConfigInfo) -> ui::ConfigView {
         source_label: info.source.label(),
         size: info.size,
         lines: info.lines,
+        validation: validation.map(|v| ui::ValidationView {
+            ok: v.ok,
+            message: v.message,
+        }),
     }
 }
 
@@ -275,12 +559,14 @@ mod tests {
         list.iter().map(|s| (*s).to_owned()).collect()
     }
 
+    /// 只关心「字段选择」时的简写。
+    fn fetch(options: Options) -> Invocation {
+        Invocation::Fetch(options)
+    }
+
     #[test]
     fn no_arguments_means_a_plain_fetch() {
-        assert_eq!(
-            parse_args(args(&[])),
-            Invocation::Fetch(Options { json: false })
-        );
+        assert_eq!(parse_args(args(&[])), fetch(Options::default()));
     }
 
     #[test]
@@ -301,7 +587,10 @@ mod tests {
     fn json_flag_selects_the_structured_output() {
         assert_eq!(
             parse_args(args(&["--json"])),
-            Invocation::Fetch(Options { json: true })
+            fetch(Options {
+                json: true,
+                ..Options::default()
+            })
         );
     }
 
@@ -336,7 +625,10 @@ mod tests {
     fn flags_can_be_combined_in_any_order() {
         assert_eq!(
             parse_args(args(&["--json", "--json"])),
-            Invocation::Fetch(Options { json: true })
+            fetch(Options {
+                json: true,
+                ..Options::default()
+            })
         );
     }
 
@@ -344,5 +636,92 @@ mod tests {
     fn empty_string_argument_is_rejected() {
         // 空参数不是有效开关，也不该被当成「没有参数」而悄悄放过。
         assert_eq!(parse_args(args(&[""])), Invocation::Unknown(String::new()));
+    }
+
+    #[test]
+    fn layout_flags_are_collected() {
+        let options = match parse_args(args(&["--short", "--no-logo", "--ascii"])) {
+            Invocation::Fetch(options) => options,
+            other => panic!("应当正常抓取，实际 {other:?}"),
+        };
+        assert!(options.short);
+        assert!(options.no_logo);
+        assert!(options.ascii);
+    }
+
+    #[test]
+    fn fields_accept_both_separated_and_equals_forms() {
+        let expected = vec![Field::Os, Field::Cpu, Field::Palette];
+        for argv in [
+            args(&["--fields", "os,cpu,palette"]),
+            args(&["--fields=os,cpu,palette"]),
+        ] {
+            let options = match parse_args(argv) {
+                Invocation::Fetch(options) => options,
+                other => panic!("应当正常抓取，实际 {other:?}"),
+            };
+            assert_eq!(options.fields.as_deref(), Some(expected.as_slice()));
+        }
+    }
+
+    #[test]
+    fn fields_preserve_order_and_drop_duplicates() {
+        let options = match parse_args(args(&["--fields", "gpu,os,os,cpu"])) {
+            Invocation::Fetch(options) => options,
+            other => panic!("应当正常抓取，实际 {other:?}"),
+        };
+        assert_eq!(
+            options.fields.as_deref(),
+            Some([Field::Gpu, Field::Os, Field::Cpu].as_slice())
+        );
+    }
+
+    #[test]
+    fn unknown_field_is_a_usage_error() {
+        assert_eq!(
+            parse_args(args(&["--fields", "os,nope"])),
+            Invocation::BadValue {
+                option: "--fields",
+                value: "nope".to_owned(),
+            }
+        );
+        // 空列表同样视为用法错误。
+        assert!(matches!(
+            parse_args(args(&["--fields", ""])),
+            Invocation::BadValue { .. }
+        ));
+    }
+
+    #[test]
+    fn missing_option_values_are_reported() {
+        assert_eq!(
+            parse_args(args(&["--fields"])),
+            Invocation::MissingValue("--fields")
+        );
+        assert_eq!(
+            parse_args(args(&["--logo-file"])),
+            Invocation::MissingValue("--logo-file")
+        );
+    }
+
+    #[test]
+    fn logo_file_path_is_kept() {
+        let options = match parse_args(args(&["--logo-file=/tmp/x.txt"])) {
+            Invocation::Fetch(options) => options,
+            other => panic!("应当正常抓取，实际 {other:?}"),
+        };
+        assert_eq!(options.logo_file.as_deref(), Some(Path::new("/tmp/x.txt")));
+    }
+
+    #[test]
+    fn bad_values_win_over_unknown_options() {
+        // `--fields` 的取值错误比后面拼错的参数更具体，优先报它。
+        assert_eq!(
+            parse_args(args(&["--fields", "nope", "--typo"])),
+            Invocation::BadValue {
+                option: "--fields",
+                value: "nope".to_owned(),
+            }
+        );
     }
 }

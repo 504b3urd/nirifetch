@@ -47,9 +47,43 @@ fn every_version_spelling_prints_the_same_line() {
 fn help_documents_the_options_and_the_author() {
     let r = run(nirifetch().arg("--help"));
     assert_eq!(r.code, Some(0));
-    for needle in ["USAGE", "OPTIONS", "--json", "--version", "AUTHOR"] {
+    for needle in [
+        "USAGE",
+        "OPTIONS",
+        "--json",
+        "--version",
+        "AUTHOR",
+        // 新选项与字段名也要出现在帮助里，方便命令行自查。
+        "--fields",
+        "--short",
+        "--no-logo",
+        "--ascii",
+        "--logo-file",
+        "FIELDS",
+        "workspace",
+        "memory",
+        "battery",
+        "palette",
+    ] {
         assert!(r.stdout.contains(needle), "--help 里缺少 {needle:?}");
     }
+}
+
+#[test]
+fn invalid_field_value_is_a_usage_error() {
+    // `--fields` 里出现不认识的字段名时应当以用法错误退出，而不是静默忽略。
+    let r = run(nirifetch().args(["--fields", "os,nope"]));
+    assert_eq!(r.code, Some(2), "用法错误应当以 EX_USAGE(2) 退出");
+    assert!(r.stdout.is_empty(), "报错时不该往 stdout 写东西");
+    assert!(r.stderr.contains("nope"), "报错里应当点名那个取值");
+}
+
+#[test]
+fn missing_field_value_is_a_usage_error() {
+    let r = run(nirifetch().arg("--fields"));
+    assert_eq!(r.code, Some(2));
+    assert!(r.stdout.is_empty());
+    assert!(r.stderr.contains("--fields"), "报错里应当点名那个参数");
 }
 
 #[test]
