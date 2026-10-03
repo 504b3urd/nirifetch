@@ -336,24 +336,38 @@ pub fn validate_config(config: &Path) -> Option<ConfigValidation> {
     })
 }
 
-/// 从 `niri validate` 的 stderr 里挑出首条错误摘要。
+/// 从 `niri validate` 的 stderr 里挑出最有用的一条错误摘要。
 ///
-/// 输出里混着带颜色的日志行（`2026-… DEBUG niri_config: loaded config`）与
-/// 多行错误框；先剥 ANSI，再取第一条含 `error` 的行，去掉 `Error:` 前缀。
+/// 输出里混着带颜色的日志行与多行错误框。首条错误常常是 `error loading config`
+/// 这类笼统的包装信息，真正有用的是后面 `identifiers cannot be used as arguments`
+/// 之类的具体原因 —— 所以跳过几句通用话术，返回第一条具体错误；全是通用话术时
+/// 才退回第一句。
 fn extract_error(stderr: &str) -> Option<String> {
-    stderr
-        .lines()
-        .map(sys::strip_ansi)
-        .map(|line| line.trim().to_owned())
-        .find(|line| line.to_ascii_lowercase().contains("error"))
-        .map(|line| {
-            let rest = line
-                .strip_prefix("Error:")
-                .or_else(|| line.strip_prefix("error:"))
-                .unwrap_or(&line);
-            rest.trim().to_owned()
-        })
-        .filter(|line| !line.is_empty())
+    const GENERIC: [&str; 3] = ["error loading config", "error parsing", "error parsing kdl"];
+
+    let mut fallback: Option<String> = None;
+    for line in stderr.lines() {
+        let clean = sys::strip_ansi(line);
+        let clean = clean.trim();
+        // 只认真正的错误头行；多行错误框的续行（`├─▶ …`）不带这个前缀，跳过。
+        let Some(rest) = clean
+            .strip_prefix("Error:")
+            .or_else(|| clean.strip_prefix("error:"))
+        else {
+            continue;
+        };
+        // 去掉 `×` 这个装饰性前缀。
+        let message = rest.trim().trim_start_matches('×').trim();
+        if message.is_empty() {
+            continue;
+        }
+        if GENERIC.contains(&message.to_ascii_lowercase().as_str()) {
+            fallback.get_or_insert_with(|| message.to_owned());
+            continue;
+        }
+        return Some(message.to_owned());
+    }
+    fallback
 }
 
 // ════════════════════════════════════════════════════════════════════
@@ -669,8 +683,8 @@ mod tests {
     }
 
     #[test]
-    fn extracts_the_first_error_from_validate_output() {
-        // 真实输出里混着带颜色的日志行，取第一条含 error 的行并剥掉前缀。
+    fn extracts_the_first_specific_error_from_validate_output() {
+        // 真实输出里混着带颜色的日志行；`Error:` 与装饰性的 `×` 都要剥掉。
         let stderr = "\
 \x1b[2m2026-10-03T05:30:54Z\x1b[0m \x1b[34mDEBUG\x1b[0m \x1b[2mniri_config\x1b[0m loaded config
 \x1b[1m\x1b[31mError:\x1b[0m   × found `{`, expected `\"`
@@ -678,9 +692,32 @@ mod tests {
 ";
         assert_eq!(
             extract_error(stderr).as_deref(),
-            Some("× found `{`, expected `\"`")
+            Some("found `{`, expected `\"`")
         );
-        // 没有 error 行时返回 None，不编造摘要。
+    }
+
+    #[test]
+    fn skips_generic_wrapper_errors() {
+        // 首条错误只是 `error loading config`，真正的原因是后一条。
+        let stderr = "\
+Error:   × error loading config
+  ├─▶ error parsing
+  ╰─▶ error parsing KDL
+
+Error:   × identifiers cannot be used as arguments
+   ╭─[bad.kdl:1:1]
+";
+        assert_eq!(
+            extract_error(stderr).as_deref(),
+            Some("identifiers cannot be used as arguments")
+        );
+
+        // 全是通用话术时退回第一句，而不是什么都不报。
+        assert_eq!(
+            extract_error("Error:   × error loading config\n").as_deref(),
+            Some("error loading config")
+        );
+        // 完全没有 error 行时返回 None，不编造摘要。
         assert_eq!(extract_error("config is valid\n"), None);
     }
 

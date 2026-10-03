@@ -29,6 +29,7 @@ mod ui;
 use std::io::Write as _;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
+use std::thread::{self, Scope, ScopedJoinHandle};
 
 use ipc::NiriIpc;
 use sys::env_non_empty;
@@ -274,10 +275,17 @@ fn build_layout(options: &Options) -> ui::Layout {
     }
 }
 
+/// 自定义 Logo 文件的读取上限。
+///
+/// Logo 再大也就几十行，这里给足余量；设上限是为了防住
+/// `--logo-file /dev/zero`（无限文件）或误指向巨型文件时把内存吃光。
+const MAX_LOGO_BYTES: u64 = 64 * 1024;
+
 /// 读取自定义 Logo：按行切分，丢掉空行，保留行内空白。
 fn read_logo_file(path: &Path) -> Option<Vec<String>> {
-    let bytes = std::fs::read(path).ok()?;
-    let text = String::from_utf8_lossy(&bytes);
+    // 用带字节上限的读取，而不是 `std::fs::read` —— 后者会一直读到 EOF，
+    // 对 `/dev/zero` 这类无限文件会持续膨胀直到内存耗尽。
+    let text = sys::read_capped(path, MAX_LOGO_BYTES)?;
     let lines: Vec<String> = text
         .lines()
         .map(|line| line.trim_end().to_owned())
@@ -294,6 +302,29 @@ fn warn(message: &str) {
 // ════════════════════════════════════════════════════════════════════
 //  采集
 // ════════════════════════════════════════════════════════════════════
+
+/// 在并行作用域里生成一个线程；创建失败时返回 `None` 而不是 panic。
+///
+/// `std::thread::Scope::spawn` 在线程创建失败（资源耗尽）时会 panic，与
+/// 「绝不 panic」的承诺冲突。改走 `Builder::spawn_scoped`，失败就把该字段
+/// 退化成默认值。
+fn spawn<'scope, 'env, T, F>(
+    scope: &'scope Scope<'scope, 'env>,
+    f: F,
+) -> Option<ScopedJoinHandle<'scope, T>>
+where
+    F: FnOnce() -> T + Send + 'scope,
+    T: Send + 'scope,
+{
+    thread::Builder::new().spawn_scoped(scope, f).ok()
+}
+
+/// 等待并行线程结束并取其结果；线程创建失败或线程 panic 时返回默认值。
+fn joined<'scope, T: Default>(handle: Option<ScopedJoinHandle<'scope, T>>) -> T {
+    handle
+        .and_then(|handle| handle.join().ok())
+        .unwrap_or_default()
+}
 
 /// 采集全部展示数据。
 ///
@@ -325,46 +356,46 @@ fn collect(client: &NiriIpc) -> ui::Info {
         battery,
         load,
     ) = std::thread::scope(|scope| {
-        let terminal = scope.spawn(font::probe);
-        let wm = scope.spawn(|| compositor_version(client));
-        let window = scope.spawn(|| focused_window(client));
-        let output = scope.spawn(|| primary_output(client));
-        let cpu = scope.spawn(cpu_view);
-        let gpus = scope.spawn(gpu_views);
-        let bar = scope.spawn(|| bar::probe(&config));
-        let workspace = scope.spawn(|| workspace_view(client));
-        let keyboard = scope.spawn(|| keyboard_view(client));
-        let validation = scope.spawn(|| ipc::validate_config(&config.path));
-        let memory = scope.spawn(system::memory);
-        let disk = scope.spawn(|| system::disk("/"));
-        let kernel = scope.spawn(system::kernel);
-        let shell = scope.spawn(system::shell);
-        let uptime = scope.spawn(system::uptime_seconds);
-        let packages = scope.spawn(system::packages);
-        let battery = scope.spawn(system::battery);
-        let load = scope.spawn(system::load);
+        let terminal = spawn(scope, font::probe);
+        let wm = spawn(scope, || compositor_version(client));
+        let window = spawn(scope, || focused_window(client));
+        let output = spawn(scope, || primary_output(client));
+        let cpu = spawn(scope, cpu_view);
+        let gpus = spawn(scope, gpu_views);
+        let bar = spawn(scope, || bar::probe(&config));
+        let workspace = spawn(scope, || workspace_view(client));
+        let keyboard = spawn(scope, || keyboard_view(client));
+        let validation = spawn(scope, || ipc::validate_config(&config.path));
+        let memory = spawn(scope, system::memory);
+        let disk = spawn(scope, || system::disk("/"));
+        let kernel = spawn(scope, system::kernel);
+        let shell = spawn(scope, system::shell);
+        let uptime = spawn(scope, system::uptime_seconds);
+        let packages = spawn(scope, system::packages);
+        let battery = spawn(scope, system::battery);
+        let load = spawn(scope, system::load);
 
-        // 各闭包都不会 panic；即便真的 panic 了，`join().unwrap_or_default()`
-        // 也只会把该字段退化成 `None`，不会把整个进程带崩。
+        // 各闭包都不会 panic；即便真的 panic 了，`join()` 失败也只会把该字段
+        // 退化成默认值，不会把整个进程带崩。
         (
-            terminal.join().unwrap_or_default(),
-            wm.join().unwrap_or_default(),
-            window.join().unwrap_or_default(),
-            output.join().unwrap_or_default(),
-            cpu.join().unwrap_or_default(),
-            gpus.join().unwrap_or_default(),
-            bar.join().unwrap_or_default(),
-            workspace.join().unwrap_or_default(),
-            keyboard.join().unwrap_or_default(),
-            validation.join().unwrap_or_default(),
-            memory.join().unwrap_or_default(),
-            disk.join().unwrap_or_default(),
-            kernel.join().unwrap_or_default(),
-            shell.join().unwrap_or_default(),
-            uptime.join().unwrap_or_default(),
-            packages.join().unwrap_or_default(),
-            battery.join().unwrap_or_default(),
-            load.join().unwrap_or_default(),
+            joined(terminal),
+            joined(wm),
+            joined(window),
+            joined(output),
+            joined(cpu),
+            joined(gpus),
+            joined(bar),
+            joined(workspace),
+            joined(keyboard),
+            joined(validation),
+            joined(memory),
+            joined(disk),
+            joined(kernel),
+            joined(shell),
+            joined(uptime),
+            joined(packages),
+            joined(battery),
+            joined(load),
         )
     });
 
@@ -723,5 +754,45 @@ mod tests {
                 value: "nope".to_owned(),
             }
         );
+    }
+
+    #[test]
+    fn logo_file_is_split_into_lines() {
+        let path = std::env::temp_dir().join(format!("nirifetch-logo-{}", std::process::id()));
+        std::fs::write(&path, "  _\n | |\n\n A \n").expect("写入临时 Logo");
+
+        let lines = read_logo_file(&path).expect("应当读到行");
+        // 行尾空白被去掉，空行被丢弃，行首空白保留（点阵对齐需要）。
+        assert_eq!(lines, vec!["  _", " | |", " A"]);
+
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn logo_file_read_is_bounded_and_never_missing_panics() {
+        // 目录、不存在的路径都读不出内容 —— 调用方会退回内置 Logo。
+        assert!(read_logo_file(Path::new("/")).is_none());
+        assert!(read_logo_file(Path::new("/nonexistent/logo")).is_none());
+
+        // 远超上限的文件只读前 MAX_LOGO_BYTES 字节，不会无节制增长。
+        let path = std::env::temp_dir().join(format!("nirifetch-logo-big-{}", std::process::id()));
+        let line = "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\n";
+        let mut content = String::new();
+        while content.len() < (MAX_LOGO_BYTES as usize) * 2 {
+            content.push_str(line);
+        }
+        std::fs::write(&path, &content).expect("写入临时大 Logo");
+
+        let total: usize = read_logo_file(&path)
+            .expect("大文件也应读到内容")
+            .iter()
+            .map(|line| line.len() + 1)
+            .sum();
+        assert!(
+            total <= MAX_LOGO_BYTES as usize + 64,
+            "读取没有被上限截住：{total} 字节"
+        );
+
+        let _ = std::fs::remove_file(&path);
     }
 }

@@ -48,11 +48,23 @@ pub fn uptime_seconds() -> Option<u64> {
 /// 1 / 5 / 15 分钟平均负载，取自 `/proc/loadavg`。
 pub fn load() -> Option<[f32; 3]> {
     let text = sys::read_capped(Path::new("/proc/loadavg"), MAX_SMALL_BYTES)?;
+    parse_load(&text)
+}
+
+/// 解析 `/proc/loadavg` 的前三个数。
+///
+/// 抽成纯函数便于测试：JSON 没有 NaN / inf，正常 loadavg 也不会出现，
+/// 但源头挡掉最省事。
+fn parse_load(text: &str) -> Option<[f32; 3]> {
     let mut fields = text.split_whitespace();
     let one: f32 = fields.next()?.parse().ok()?;
     let five: f32 = fields.next()?.parse().ok()?;
     let fifteen: f32 = fields.next()?.parse().ok()?;
-    Some([one, five, fifteen])
+    let values = [one, five, fifteen];
+    values
+        .iter()
+        .all(|value| value.is_finite())
+        .then_some(values)
 }
 
 // ════════════════════════════════════════════════════════════════════
@@ -234,7 +246,9 @@ pub fn battery() -> Option<Battery> {
             continue;
         }
         let base = entry.path();
-        let Some(percent) = read_trimmed_path(&base.join("capacity")).and_then(|v| v.parse().ok())
+        let Some(percent) = read_trimmed_path(&base.join("capacity"))
+            .as_deref()
+            .and_then(parse_percent)
         else {
             continue;
         };
@@ -242,6 +256,11 @@ pub fn battery() -> Option<Battery> {
         return Some(Battery { percent, status });
     }
     None
+}
+
+/// 解析电池百分比。少数驱动会在数值后带一个 `%`，一并容忍。
+fn parse_percent(raw: &str) -> Option<u8> {
+    raw.trim().trim_end_matches('%').trim().parse().ok()
 }
 
 // ════════════════════════════════════════════════════════════════════
@@ -274,6 +293,30 @@ mod tests {
         assert_eq!(parse_leading_u64(" 0"), Some(0));
         assert_eq!(parse_leading_u64("kB"), None);
         assert_eq!(parse_leading_u64(""), None);
+    }
+
+    #[test]
+    fn parses_load_averages_and_rejects_non_finite() {
+        assert_eq!(
+            parse_load("0.20 0.49 0.38 1/704 16632\n"),
+            Some([0.20, 0.49, 0.38])
+        );
+        // JSON 没有 NaN / inf，含它们的行必须整条丢弃。
+        assert_eq!(parse_load("nan inf 0.10"), None);
+        assert_eq!(parse_load("0.1 nan 0.3"), None);
+        // 字段不足同样返回 None，不能 panic。
+        assert_eq!(parse_load("0.1 0.2"), None);
+        assert_eq!(parse_load(""), None);
+    }
+
+    #[test]
+    fn parses_battery_percent_with_and_without_sign() {
+        assert_eq!(parse_percent("85"), Some(85));
+        assert_eq!(parse_percent(" 100%\n"), Some(100));
+        assert_eq!(parse_percent("0"), Some(0));
+        assert_eq!(parse_percent("Unknown"), None);
+        // 超过 u8 的值不 panic，只是取不到。
+        assert_eq!(parse_percent("999"), None);
     }
 
     #[test]

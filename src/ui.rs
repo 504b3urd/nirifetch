@@ -691,7 +691,9 @@ fn logo_lines(logo: &Logo, truecolor: bool) -> Vec<(usize, String)> {
                 .enumerate()
                 .map(|(i, line)| {
                     (
-                        display_width(line),
+                        // 用 `plain_width` 而非 `display_width`：用户可能往 Logo
+                        // 里塞 ANSI 颜色，转义码不该算进列宽。
+                        plain_width(line),
                         line.as_str()
                             .color(logo_color(i, last, truecolor))
                             .to_string(),
@@ -988,9 +990,10 @@ fn format_bar(bar: Option<&str>) -> String {
     }
 }
 
-/// 配置：`~/.config/niri/config.kdl (6.6 KiB · 135 lines)`。
+/// 配置：`~/.config/niri/config.kdl (6.6 KiB · 135 lines) ✓`。
 ///
-/// 预算不够时**先整体丢掉括号内的元信息**，再考虑截断路径：路径是这一行存在的
+/// 预算不够时按优先级逐级舍弃：**先丢错误摘要**（最占地方），再丢括号里的
+/// 元信息，但要尽量保住校验标记；最后才考虑截断路径 —— 路径是这一行存在的
 /// 理由，`~/.config/nir…` 这种残缺路径反而让人认不出是哪个文件。
 fn format_config(c: &ConfigView, home: Option<&str>, budget: usize) -> String {
     let path = shorten_home(&c.path, home);
@@ -1013,36 +1016,43 @@ fn format_config(c: &ConfigView, home: Option<&str>, budget: usize) -> String {
     if let Some(label) = c.source_label {
         meta.push(label.to_owned());
     }
-
-    let full = if meta.is_empty() {
-        path.bold().to_string()
+    let meta_suffix = if meta.is_empty() {
+        String::new()
     } else {
-        format!(
-            "{} {}",
-            path.bold(),
-            format!("({})", meta.join(" · ")).bright_black()
-        )
+        format!(" {}", format!("({})", meta.join(" · ")).bright_black())
     };
 
-    // 校验标记挂在元信息之后：合法只给一个绿勾，非法补一句错误摘要。
-    let full = match &c.validation {
-        Some(v) if v.ok => format!("{full} {}", "✓".green()),
-        Some(v) => {
-            let mut text = format!("{full} {}", "✗".red().bold());
-            if let Some(message) = &v.message {
-                text.push_str(&format!(" {}", message.bright_black()));
-            }
-            text
+    let (marker, message) = match &c.validation {
+        Some(v) if v.ok => (Some("✓".green().to_string()), None),
+        Some(v) => (Some("✗".red().bold().to_string()), v.message.clone()),
+        None => (None, None),
+    };
+
+    let base = format!("{}{meta_suffix}", path.bold());
+    let path_only = path.bold().to_string();
+
+    // 候选由「最完整」到「最精简」，取第一个放得下的。
+    // 校验标记比元信息更值得保住，所以在丢掉元信息之后仍留一档 `路径 + 标记`。
+    let mut candidates: Vec<String> = Vec::new();
+    if let (Some(marker), Some(message)) = (&marker, &message) {
+        candidates.push(format!("{base} {marker} {}", message.bright_black()));
+    }
+    if let Some(marker) = &marker {
+        candidates.push(format!("{base} {marker}"));
+        candidates.push(format!("{path_only} {marker}"));
+    }
+    if !meta_suffix.is_empty() {
+        candidates.push(base);
+    }
+    candidates.push(path_only);
+
+    for candidate in candidates {
+        if plain_width(&candidate) <= budget {
+            return candidate;
         }
-        None => full,
-    };
-
-    if plain_width(&full) <= budget {
-        return full;
     }
 
-    // 路径 + 元信息 + 校验放不下，退到只剩路径；
-    // 连路径都放不下才截断它。
+    // 连路径都放不下，才轮到截断它。
     truncate(&path, budget).bold().to_string()
 }
 
@@ -2189,6 +2199,34 @@ mod tests {
         let text = strip_ansi(&format_config(&bad, Some("/home/user"), VALUE_MAX));
         assert!(text.contains('✗'), "非法配置应有叉号：{text}");
         assert!(text.contains("unexpected token"), "应显示错误摘要：{text}");
+    }
+
+    #[test]
+    fn config_line_keeps_the_marker_when_the_message_does_not_fit() {
+        let view = ConfigView {
+            path: "/home/user/.config/niri/config.kdl".to_owned(),
+            exists: true,
+            source_label: None,
+            size: Some(6714),
+            lines: Some(135),
+            validation: Some(ValidationView {
+                ok: false,
+                message: Some("identifiers cannot be used as arguments".to_owned()),
+            }),
+        };
+        // 预算放不下整行时，先丢错误摘要，但路径与 ✗ 必须保住。
+        let text = strip_ansi(&format_config(&view, Some("/home/user"), 30));
+        assert!(
+            text.starts_with("~/.config/niri/config.kdl"),
+            "路径应保留：{text}"
+        );
+        assert!(text.contains('✗'), "校验标记应保留：{text}");
+        assert!(!text.contains("identifiers"), "应先丢错误摘要：{text}");
+        assert!(
+            display_width(&text) <= 30,
+            "实际宽度 {}",
+            display_width(&text)
+        );
     }
 
     #[test]
