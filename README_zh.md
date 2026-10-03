@@ -143,7 +143,7 @@ nirifetch --json | jq -r '.bar'
 ## 开发
 
 ```sh
-cargo test        # 201 个测试，不需要网络或特殊硬件
+cargo test        # 203 个测试，不需要网络或特殊硬件
 cargo clippy --all-targets
 cargo fmt
 ```

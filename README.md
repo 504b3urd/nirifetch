@@ -144,7 +144,7 @@ Without `hwdata` installed, step 1 and 2 are unavailable and names fall back to 
 ## Development
 
 ```sh
-cargo test        # 201 tests, no network or special hardware needed
+cargo test        # 203 tests, no network or special hardware needed
 cargo clippy --all-targets
 cargo fmt
 ```

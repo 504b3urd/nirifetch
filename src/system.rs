@@ -140,10 +140,17 @@ pub struct Memory {
 /// 从 `/proc/meminfo` 读取内存信息。
 ///
 /// `MemAvailable` 是较新内核对「不触发交换就能给新进程用」的估算，比 `MemFree`
-/// 更贴近用户直觉；老内核没有它时回退到 `MemFree`（会是 0 则说明都读不到）。
+/// 更贴近用户直觉。**注意 `/proc/meminfo` 里 `MemFree` 排在 `MemAvailable`
+/// 之前**，所以不能一见到 `MemFree` 就提前收工 —— 否则永远读不到
+/// `MemAvailable`，会误用明显偏大的 `MemFree`。老内核没有 `MemAvailable` 时
+/// 才回退到 `MemFree`。
 pub fn memory() -> Option<Memory> {
     let text = sys::read_capped(Path::new("/proc/meminfo"), MAX_SMALL_BYTES)?;
+    parse_meminfo(&text)
+}
 
+/// [`memory`] 的纯解析部分，便于用真实的 `/proc/meminfo` 样例做测试。
+fn parse_meminfo(text: &str) -> Option<Memory> {
     let mut total = None;
     let mut available = None;
     let mut free = None;
@@ -155,7 +162,8 @@ pub fn memory() -> Option<Memory> {
         } else if let Some(rest) = line.strip_prefix("MemFree:") {
             free = parse_leading_u64(rest);
         }
-        if total.is_some() && (available.is_some() || free.is_some()) {
+        // 只在**拿全** total 与 available 时才提前收工；只看 free 会漏掉 available。
+        if total.is_some() && available.is_some() {
             break;
         }
     }
@@ -415,26 +423,35 @@ Filesystem     1024-blocks     Used Available Capacity Mounted on
     }
 
     #[test]
-    fn memory_sample_is_parsed() {
-        // 直接验证解析逻辑，避免依赖跑测试的机器的真实内存。
-        let text = "MemTotal:       20267444 kB\nMemFree:        15644408 kB\nMemAvailable:   17768624 kB\n";
-        let mut total = None;
-        let mut available = None;
-        let mut free = None;
-        for line in text.lines() {
-            if let Some(rest) = line.strip_prefix("MemTotal:") {
-                total = parse_leading_u64(rest);
-            } else if let Some(rest) = line.strip_prefix("MemAvailable:") {
-                available = parse_leading_u64(rest);
-            } else if let Some(rest) = line.strip_prefix("MemFree:") {
-                free = parse_leading_u64(rest);
-            }
-        }
-        let mem = Memory {
-            total_kib: total.expect("有 MemTotal"),
-            available_kib: available.or(free).unwrap_or(0),
-        };
+    fn prefers_mem_available_over_mem_free() {
+        // 真实 /proc/meminfo 的顺序：MemFree 在 MemAvailable 之前。
+        // 曾经的 bug 就是见到 MemFree 就提前收工，导致内存用量虚高近一倍。
+        let text = "\
+MemTotal:       20267444 kB
+MemFree:       11989272 kB
+MemAvailable:  16271028 kB
+Buffers:           10712 kB
+Cached:          4173776 kB
+";
+        let mem = parse_meminfo(text).expect("应当能解析");
         assert_eq!(mem.total_kib, 20267444);
-        assert_eq!(mem.available_kib, 17768624);
+        assert_eq!(
+            mem.available_kib, 16271028,
+            "必须用 MemAvailable，而不是更早出现的 MemFree"
+        );
+    }
+
+    #[test]
+    fn falls_back_to_mem_free_without_mem_available() {
+        // 老内核没有 MemAvailable，只能退而用 MemFree。
+        let mem = parse_meminfo("MemTotal: 1000 kB\nMemFree: 400 kB\n").expect("应当能解析");
+        assert_eq!(mem.total_kib, 1000);
+        assert_eq!(mem.available_kib, 400);
+    }
+
+    #[test]
+    fn missing_total_yields_none() {
+        assert!(parse_meminfo("MemFree: 400 kB\nMemAvailable: 800 kB\n").is_none());
+        assert!(parse_meminfo("").is_none());
     }
 }
