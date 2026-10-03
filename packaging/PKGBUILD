@@ -11,7 +11,7 @@
 #    AUR 仓库是独立的克隆，在那儿构建天然安全。
 
 pkgname=nirifetch
-pkgver=0.1.0
+pkgver=0.2.0
 pkgrel=1
 pkgdesc="A lightweight fetch tool for the Niri Wayland compositor"
 arch=('x86_64' 'aarch64')
@@ -23,7 +23,7 @@ makedepends=('cargo')
 # 没有它也能跑，只是显卡名会退化成代号（HawkPoint1）。
 optdepends=('hwdata: for accurate PCI device naming')
 source=("$pkgname-$pkgver.tar.gz::$url/archive/refs/tags/v$pkgver.tar.gz")
-sha256sums=('77fba793d9e4479a569da509cb60a6cbd76398e3a76976cbc41995e6bcde9acb')
+sha256sums=('68245fc19ddba43896bcf786842181de948267d537bcd5186c6dddfcf1c63cf7')
 
 build() {
   cd "$pkgname-$pkgver"

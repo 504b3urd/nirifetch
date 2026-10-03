@@ -24,11 +24,11 @@ makepkg -si          # -s 自动装缺失的 makedepends，-i 构建完直接装
 
 ```sh
 makepkg -f
-sudo pacman -U nirifetch-0.1.0-1-x86_64.pkg.tar.zst
+sudo pacman -U nirifetch-0.2.0-1-x86_64.pkg.tar.zst
 ```
 
 `build()` 用 `cargo build --release --locked`，`check()` 会跑完整测试套件
-（171 个测试，不联网也不需要特定硬件）。
+（193 个测试，不联网也不需要特定硬件）。
 
 ## 发布到 AUR
 
@@ -68,7 +68,7 @@ git push
 updpkgsums
 
 # 或者手动
-curl -sL https://github.com/504b3urd/nirifetch/archive/refs/tags/v0.1.0.tar.gz | sha256sum
+curl -sL https://github.com/504b3urd/nirifetch/archive/refs/tags/v0.2.0.tar.gz | sha256sum
 ```
 
 4. 重新生成 `.SRCINFO`，推 AUR
