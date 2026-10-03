@@ -12,7 +12,7 @@
 
 pkgname=nirifetch
 pkgver=0.2.0
-pkgrel=1
+pkgrel=2
 pkgdesc="A lightweight fetch tool for the Niri Wayland compositor"
 arch=('x86_64' 'aarch64')
 url="https://github.com/504b3urd/nirifetch"
@@ -23,7 +23,7 @@ makedepends=('cargo')
 # 没有它也能跑，只是显卡名会退化成代号（HawkPoint1）。
 optdepends=('hwdata: for accurate PCI device naming')
 source=("$pkgname-$pkgver.tar.gz::$url/archive/refs/tags/v$pkgver.tar.gz")
-sha256sums=('68245fc19ddba43896bcf786842181de948267d537bcd5186c6dddfcf1c63cf7')
+sha256sums=('b3f83d8f33a4de22c16f0b33244ef978e89d2c5bc67bc50daa081a6d72031f1b')
 
 build() {
   cd "$pkgname-$pkgver"
